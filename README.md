@@ -63,6 +63,7 @@ https://github.com/zhuzhug/MoviePilot-Plugins
 如果在使用过程中遇到问题，欢迎提交 Issue。Pull Request 请在提交前保持插件目录结构与 `package.v2.json` 元数据一致。
 
 ⚠️ 免责声明
+
 随性开发，不保证好用
 本仓库所有插件均为个人兴趣开发，随缘维护，不承诺任何功能性、稳定性或兼容性。可能好用，也可能不好用，甚至可能不能用。
 
