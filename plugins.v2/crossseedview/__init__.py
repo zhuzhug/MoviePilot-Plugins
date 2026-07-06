@@ -58,7 +58,7 @@ class CrossSeedView(_PluginBase):
     plugin_name = "辅种查看"
     plugin_desc = "扫描所有下载器种子，按“种子名+大小”识别辅种关系，用可折叠卡片展示辅种数量、保存路径与明细，支持交互筛选与可选删除。"
     plugin_icon = "seed.png"
-    plugin_version = "0.5.0"
+    plugin_version = "0.5.1"
     plugin_label = "下载器"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "crossseedview_"
@@ -1029,12 +1029,13 @@ class CrossSeedView(_PluginBase):
         }
 
         # 构建卡片列表
-        delete_api = f"plugin/CrossSeedView/delete_torrent?apikey={settings.API_TOKEN}"
-        toggle_select_api = f"plugin/CrossSeedView/toggle_select?apikey={settings.API_TOKEN}"
-        select_all_api = f"plugin/CrossSeedView/select_all?apikey={settings.API_TOKEN}"
-        select_invert_api = f"plugin/CrossSeedView/select_invert?apikey={settings.API_TOKEN}"
-        select_clear_api = f"plugin/CrossSeedView/select_clear?apikey={settings.API_TOKEN}"
-        batch_delete_api = f"plugin/CrossSeedView/batch_delete?apikey={settings.API_TOKEN}"
+        # 采用相对路径，前端 axios 自动携带鉴权，成功后自动触发 action 事件重新拉取 get_page
+        delete_api = "plugin/CrossSeedView/delete_torrent"
+        toggle_select_api = "plugin/CrossSeedView/toggle_select"
+        select_all_api = "plugin/CrossSeedView/select_all"
+        select_invert_api = "plugin/CrossSeedView/select_invert"
+        select_clear_api = "plugin/CrossSeedView/select_clear"
+        batch_delete_api = "plugin/CrossSeedView/batch_delete"
         MAX_DELETE_CARDS = 50
 
         def _torrent_row(t: dict, show_delete: bool) -> dict:
