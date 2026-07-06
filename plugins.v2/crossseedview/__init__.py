@@ -25,6 +25,9 @@ class SaveFiltersParams(BaseModel):
     path_keyword: Optional[str] = Field(default=None, description="保存路径关键词")
     size_min_gb: Optional[float] = Field(default=None, description="大小下限(GB)")
     size_max_gb: Optional[float] = Field(default=None, description="大小上限(GB,0=不限)")
+    sort_by: Optional[str] = Field(default=None, description="排序字段:count/size/name/seeding_time/uploaded")
+    sort_order: Optional[str] = Field(default=None, description="排序方向:desc/asc")
+    view_mode: Optional[str] = Field(default=None, description="视图模式:group(按分组)/downloader(按下载器)")
 
 
 class DeleteTorrentParams(BaseModel):
@@ -35,6 +38,19 @@ class DeleteTorrentParams(BaseModel):
     delete_files: bool = Field(default=False, description="是否同时删除文件")
 
 
+class ToggleSelectParams(BaseModel):
+    """切换单个种子的选中状态。"""
+
+    hash: str = Field(..., description="种子 hash")
+    downloader: str = Field(..., description="下载器名称")
+
+
+class BatchDeleteParams(BaseModel):
+    """批量删除已选中的种子。"""
+
+    delete_files: bool = Field(default=False, description="是否同时删除文件")
+
+
 class CrossSeedView(_PluginBase):
     """辅种查看插件：扫描下载器中的种子，按 name+size 分组识别辅种，用于清理孤种。"""
 
@@ -42,7 +58,7 @@ class CrossSeedView(_PluginBase):
     plugin_name = "辅种查看"
     plugin_desc = "扫描所有下载器种子，按“种子名+大小”识别辅种关系，用可折叠卡片展示辅种数量、保存路径与明细，支持交互筛选与可选删除。"
     plugin_icon = "seed.png"
-    plugin_version = "0.4.3"
+    plugin_version = "0.5.0"
     plugin_label = "下载器"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "crossseedview_"
@@ -63,6 +79,9 @@ class CrossSeedView(_PluginBase):
     _size_min_gb: float = 0.0
     _size_max_gb: float = 0.0  # 0 = 不限
     _allow_delete: bool = False  # 安全开关：详情页是否显示删除按钮
+    _sort_by: str = "count"  # 排序字段: count/size/name/seeding_time/uploaded
+    _sort_order: str = "desc"  # 排序方向: desc/asc
+    _view_mode: str = "group"  # 视图模式: group(按分组) / downloader(按下载器聚合)
 
     _cache_lock: Lock = Lock()
     _cache: Dict[str, Any] = {
@@ -74,6 +93,10 @@ class CrossSeedView(_PluginBase):
         "updated_at": "",
         "error": "",
     }
+    # 选中集合：{hash: downloader}，非持久化，重启即空
+    _selected: Dict[str, str] = {}
+    # 上次渲染时的可见种子列表 [(hash, downloader)]，用于全选/反选
+    _last_visible: List[Tuple[str, str]] = []
     # endregion
 
     def init_plugin(self, config: dict = None) -> None:
@@ -103,6 +126,9 @@ class CrossSeedView(_PluginBase):
             except (TypeError, ValueError):
                 self._size_max_gb = 0.0
             self._allow_delete = bool(config.get("allow_delete", False))
+            self._sort_by = str(config.get("sort_by") or "count").strip() or "count"
+            self._sort_order = str(config.get("sort_order") or "desc").strip() or "desc"
+            self._view_mode = str(config.get("view_mode") or "group").strip() or "group"
 
         if not self._enabled:
             logger.info("[CrossSeedView] 插件未启用。")
@@ -169,6 +195,41 @@ class CrossSeedView(_PluginBase):
                 "methods": ["GET"],
                 "auth": "bear",
                 "summary": "重置详情页筛选条件为默认值",
+            },
+            {
+                "path": "/toggle_select",
+                "endpoint": self.toggle_select,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "切换单个种子的选中状态",
+            },
+            {
+                "path": "/select_all",
+                "endpoint": self.select_all,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "全选当前可见种子",
+            },
+            {
+                "path": "/select_invert",
+                "endpoint": self.select_invert,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "反选当前可见种子",
+            },
+            {
+                "path": "/select_clear",
+                "endpoint": self.select_clear,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "清空选择",
+            },
+            {
+                "path": "/batch_delete",
+                "endpoint": self.batch_delete,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "批量删除已选中的种子",
             },
         ]
 
@@ -277,6 +338,103 @@ class CrossSeedView(_PluginBase):
         except Exception as err:  # noqa: BLE001
             logger.debug(f"[CrossSeedView] 删除后刷新缓存失败（忽略）：{err}")
         return Response(success=True, message="已删除")
+
+    # ---------- 多选相关 API ----------
+
+    def toggle_select(self, params: ToggleSelectParams) -> Response:
+        """切换单个种子的选中状态。"""
+        if not self._enabled:
+            return Response(success=False, message="插件未启用")
+        if not params.hash or not params.downloader:
+            return Response(success=False, message="参数不完整")
+        h = params.hash
+        if h in self._selected:
+            del self._selected[h]
+        else:
+            self._selected[h] = params.downloader
+        return Response(success=True, message=f"已选 {len(self._selected)} 项")
+
+    def select_all(self) -> Response:
+        """全选当前可见种子（基于上次 get_page 渲染时的可见集合）。"""
+        if not self._enabled:
+            return Response(success=False, message="插件未启用")
+        added = 0
+        for h, dl in self._last_visible:
+            if h and dl and h not in self._selected:
+                self._selected[h] = dl
+                added += 1
+        return Response(success=True, message=f"已选 {len(self._selected)} 项（新增 {added}）")
+
+    def select_invert(self) -> Response:
+        """反选当前可见种子。"""
+        if not self._enabled:
+            return Response(success=False, message="插件未启用")
+        for h, dl in self._last_visible:
+            if not h or not dl:
+                continue
+            if h in self._selected:
+                del self._selected[h]
+            else:
+                self._selected[h] = dl
+        return Response(success=True, message=f"已选 {len(self._selected)} 项")
+
+    def select_clear(self) -> Response:
+        """清空选择。"""
+        self._selected.clear()
+        return Response(success=True, message="已清空选择")
+
+    def batch_delete(self, params: BatchDeleteParams) -> Response:
+        """批量删除已选中的种子。按下载器分组批量调用。"""
+        if not self._enabled:
+            return Response(success=False, message="插件未启用")
+        if not self._allow_delete:
+            return Response(success=False, message="删除功能未启用，请在插件设置中开启")
+        if not self._selected:
+            return Response(success=False, message="尚未选择任何种子")
+
+        # 按下载器分组
+        by_dl: Dict[str, List[str]] = defaultdict(list)
+        for h, dl in self._selected.items():
+            if h and dl:
+                by_dl[dl].append(h)
+
+        total = sum(len(v) for v in by_dl.values())
+        succeeded = 0
+        failed_dls: List[str] = []
+        for dl, hashs in by_dl.items():
+            try:
+                ok = ChainBase().remove_torrents(
+                    hashs=hashs,
+                    delete_file=bool(params.delete_files),
+                    downloader=dl,
+                )
+            except Exception as err:  # noqa: BLE001
+                logger.error(f"[CrossSeedView] 批量删除失败 downloader={dl} 数量={len(hashs)}: {err}")
+                failed_dls.append(f"{dl}({len(hashs)}):{err}")
+                continue
+            if ok:
+                succeeded += len(hashs)
+            else:
+                failed_dls.append(f"{dl}({len(hashs)})")
+
+        logger.info(
+            f"[CrossSeedView] 批量删除完成 总数={total} 成功={succeeded} "
+            f"delete_files={params.delete_files} 失败下载器={failed_dls}"
+        )
+
+        # 无论部分成败都清空选择并刷新
+        self._selected.clear()
+        try:
+            self._refresh_cache(source="batch_delete")
+        except Exception as err:  # noqa: BLE001
+            logger.debug(f"[CrossSeedView] 批量删除后刷新缓存失败（忽略）：{err}")
+
+        if failed_dls:
+            return Response(
+                success=succeeded > 0,
+                message=f"批量删除 {succeeded}/{total} 成功，失败：{'; '.join(failed_dls)}",
+            )
+        return Response(success=True, message=f"已批量删除 {succeeded} 项")
 
 
     def get_service(self) -> List[Dict[str, Any]]:
@@ -568,19 +726,104 @@ class CrossSeedView(_PluginBase):
             max_bytes = self._size_max_gb * gb
             filtered = [g for g in filtered if float(g.get("size") or 0) <= max_bytes]
 
-        filtered.sort(key=lambda g: (-int(g.get("count", 0)), str(g.get("name") or "")))
+        # 排序（动态）
+        sort_by = (self._sort_by or "count").lower()
+        sort_desc = (self._sort_order or "desc").lower() != "asc"
+
+        def _sort_key(g: Dict[str, Any]):
+            if sort_by == "size":
+                return (int(g.get("size") or 0), str(g.get("name") or ""))
+            if sort_by == "name":
+                return (str(g.get("name") or "").lower(),)
+            if sort_by == "seeding_time":
+                return (int(g.get("max_seeding_time") or 0), str(g.get("name") or ""))
+            if sort_by == "uploaded":
+                return (int(g.get("total_uploaded") or 0), str(g.get("name") or ""))
+            # 默认 count
+            return (int(g.get("count") or 0), str(g.get("name") or ""))
+
+        filtered.sort(key=_sort_key, reverse=sort_desc)
+
+        # 视图模式：按下载器聚合（把每个下载器的所有种子作为一个「组」呈现）
+        view_mode = (self._view_mode or "group").lower()
+        if view_mode == "downloader":
+            dl_map: Dict[str, Dict[str, Any]] = defaultdict(
+                lambda: {
+                    "name": "",
+                    "size": 0,
+                    "count": 0,
+                    "downloaders": set(),
+                    "save_paths": set(),
+                    "torrents": [],
+                    "max_seeding_time": 0,
+                    "total_uploaded": 0,
+                }
+            )
+            for g in filtered:
+                for t in (g.get("torrents") or []):
+                    dl = str((t or {}).get("downloader") or "-")
+                    e = dl_map[dl]
+                    e["name"] = f"[下载器] {dl}"
+                    e["size"] += int(g.get("size") or 0)
+                    e["count"] += 1
+                    e["downloaders"].add(dl)
+                    sp = (t or {}).get("save_path")
+                    if sp:
+                        e["save_paths"].add(sp)
+                    e["torrents"].append({
+                        **t,
+                        "_group_name": g.get("name") or "",
+                        "_group_size": g.get("size") or 0,
+                    })
+                    st = int((t or {}).get("seeding_time") or 0)
+                    if st > e["max_seeding_time"]:
+                        e["max_seeding_time"] = st
+                    e["total_uploaded"] += int((t or {}).get("uploaded") or 0)
+            filtered = []
+            for dl, e in dl_map.items():
+                filtered.append({
+                    "name": e["name"],
+                    "size": e["size"],
+                    "count": e["count"],
+                    "downloaders": sorted(e["downloaders"]),
+                    "save_paths": sorted(e["save_paths"]),
+                    "torrents": e["torrents"],
+                    "max_seeding_time": e["max_seeding_time"],
+                    "total_uploaded": e["total_uploaded"],
+                    "state": "",
+                })
+            filtered.sort(key=_sort_key, reverse=sort_desc)
 
         items = [
             {
                 "name": g.get("name") or "-",
                 "count": g.get("count", 0),
+                "size": g.get("size") or 0,
                 "size_text": self._fmt_size(g.get("size") or 0),
                 "save_paths_text": "\n".join(g.get("save_paths") or []) or "-",
                 "downloaders_text": "、".join(g.get("downloaders") or []) or "-",
                 "torrents": list(g.get("torrents") or []),
+                "max_seeding_time": g.get("max_seeding_time", 0),
+                "total_uploaded": g.get("total_uploaded", 0),
+                "state": g.get("state") or "",
             }
             for g in filtered
         ]
+
+        # 记录当前可见且可勾选的 (hash, downloader) 集合，供 select_all/select_invert 使用
+        # 仅在允许删除且分组在前 MAX_DELETE_CARDS 内时，明细才有复选框（与下方渲染保持一致）
+        _MAX_VISIBLE_DELETE_CARDS = 50
+        visible: List[Tuple[str, str]] = []
+        if self._allow_delete:
+            for idx, it in enumerate(items):
+                if idx >= _MAX_VISIBLE_DELETE_CARDS:
+                    break
+                for t in it.get("torrents") or []:
+                    h = str(t.get("hash") or "")
+                    dl = str(t.get("downloader") or "")
+                    if h and dl:
+                        visible.append((h, dl))
+        self._last_visible = visible
 
         logger.info(
             f"[CrossSeedView] get_page: 总分组={len(groups)}，"
@@ -600,6 +843,24 @@ class CrossSeedView(_PluginBase):
                     f"≥{self._min_count} 份辅种组数",
                     snapshot.get("cross_groups", 0),
                     "success",
+                ),
+            ],
+        }
+        summary_row_extra = {
+            "component": "VRow",
+            "props": {"class": "mb-2"},
+            "content": [
+                self._stat_card("孤种组数", snapshot.get("orphan_groups", 0), "warning"),
+                self._stat_card("辅种组数(≥2)", snapshot.get("cross_groups", 0), "success"),
+                self._stat_card(
+                    "冗余占用",
+                    self._fmt_size(snapshot.get("redundant_bytes", 0) or 0),
+                    "error",
+                ),
+                self._stat_card(
+                    "累计上传量",
+                    self._fmt_size(snapshot.get("total_uploaded", 0) or 0),
+                    "primary",
                 ),
             ],
         }
@@ -700,6 +961,52 @@ class CrossSeedView(_PluginBase):
                 ],
             }
         ]
+
+        # 排序 & 视图模式
+        sort_options = [
+            ("count", "辅种数"),
+            ("size", "大小"),
+            ("name", "名称"),
+            ("seeding_time", "做种时间"),
+            ("uploaded", "上传量"),
+        ]
+        order_options = [("desc", "降序"), ("asc", "升序")]
+        view_options = [("group", "按分组"), ("downloader", "按下载器")]
+
+        def _dropdown_btn(label: str, value: str, current: str, field: str) -> dict:
+            active = value == current
+            return {
+                "component": "VBtn",
+                "props": {
+                    "size": "x-small",
+                    "variant": "flat" if active else "tonal",
+                    "color": "primary" if active else "grey",
+                    "class": "mr-1 mb-1",
+                },
+                "text": label,
+                "events": {"click": {"api": save_api, "method": "post", "params": {field: value}}},
+            }
+
+        control_row_content: List[dict] = [
+            {"component": "span", "props": {"class": "text-caption mr-2"}, "text": "排序："},
+        ]
+        for v, lbl in sort_options:
+            control_row_content.append(_dropdown_btn(lbl, v, self._sort_by or "count", "sort_by"))
+        control_row_content.append({"component": "VDivider", "props": {"vertical": True, "class": "mx-2"}})
+        for v, lbl in order_options:
+            control_row_content.append(_dropdown_btn(lbl, v, self._sort_order or "desc", "sort_order"))
+        control_row_content.append({"component": "VDivider", "props": {"vertical": True, "class": "mx-2"}})
+        control_row_content.append({"component": "span", "props": {"class": "text-caption mr-2"}, "text": "视图："})
+        for v, lbl in view_options:
+            control_row_content.append(_dropdown_btn(lbl, v, self._view_mode or "group", "view_mode"))
+
+        preset_row_children.append(
+            {
+                "component": "div",
+                "props": {"class": "d-flex flex-wrap align-center mt-1"},
+                "content": control_row_content,
+            }
+        )
         if top_path_row_content:
             preset_row_children.append(
                 {
@@ -723,19 +1030,39 @@ class CrossSeedView(_PluginBase):
 
         # 构建卡片列表
         delete_api = f"plugin/CrossSeedView/delete_torrent?apikey={settings.API_TOKEN}"
+        toggle_select_api = f"plugin/CrossSeedView/toggle_select?apikey={settings.API_TOKEN}"
+        select_all_api = f"plugin/CrossSeedView/select_all?apikey={settings.API_TOKEN}"
+        select_invert_api = f"plugin/CrossSeedView/select_invert?apikey={settings.API_TOKEN}"
+        select_clear_api = f"plugin/CrossSeedView/select_clear?apikey={settings.API_TOKEN}"
+        batch_delete_api = f"plugin/CrossSeedView/batch_delete?apikey={settings.API_TOKEN}"
         MAX_DELETE_CARDS = 50
 
         def _torrent_row(t: dict, show_delete: bool) -> dict:
             thash = str(t.get("hash") or "")
             dl_name = str(t.get("downloader") or "")
             save_path = str(t.get("save_path") or "")
+            state = str(t.get("state") or "")
+            seeding_time = int(t.get("seeding_time") or 0)
+            uploaded = int(t.get("uploaded") or 0)
             display_path = save_path or "-"
             # 命中当前 path_keyword 时高亮该行
             hit_path = bool(path_kw and save_path and path_kw in save_path.lower())
             row_props = {"dense": True, "class": "align-center py-1"}
             if hit_path:
                 row_props["style"] = "background-color: rgba(76,175,80,0.10); border-left: 3px solid #4caf50;"
-            path_col_content = [
+            # 附加：所属分组信息（仅按下载器视图时可用）
+            group_hint = ""
+            if t.get("_group_name"):
+                gs = int(t.get("_group_size") or 0)
+                group_hint = f"{t.get('_group_name')} · {self._fmt_size(gs)}"
+            path_col_content = []
+            if group_hint:
+                path_col_content.append({
+                    "component": "div",
+                    "props": {"class": "text-caption text-primary text-truncate", "style": "user-select: text;"},
+                    "text": group_hint,
+                })
+            path_col_content.extend([
                 {
                     "component": "div",
                     "props": {
@@ -749,7 +1076,7 @@ class CrossSeedView(_PluginBase):
                     "props": {"class": "text-caption text-disabled", "style": "user-select: text;"},
                     "text": f"hash: {thash[:16]}..." if thash else "hash: -",
                 },
-            ]
+            ])
             # 「筛选此路径」按钮：将此行 save_path 写入 path_keyword
             if save_path:
                 path_col_content.append(
@@ -772,22 +1099,75 @@ class CrossSeedView(_PluginBase):
                         },
                     }
                 )
+            # 元数据 chip 列（状态 / 做种时间 / 上传量）
+            meta_chips: List[dict] = []
+            if state:
+                meta_chips.append({
+                    "component": "VChip",
+                    "props": {"size": "x-small", "color": "secondary", "variant": "tonal", "class": "mr-1"},
+                    "text": state,
+                })
+            if seeding_time > 0:
+                meta_chips.append({
+                    "component": "VChip",
+                    "props": {"size": "x-small", "color": "info", "variant": "tonal", "class": "mr-1"},
+                    "text": self._fmt_duration(seeding_time),
+                })
+            if uploaded > 0:
+                meta_chips.append({
+                    "component": "VChip",
+                    "props": {"size": "x-small", "color": "success", "variant": "tonal"},
+                    "text": f"↑{self._fmt_size(uploaded)}",
+                })
+            dl_col_content: List[dict] = []
+            if show_delete and thash and dl_name:
+                dl_col_content.append({
+                    "component": "VBtn",
+                    "props": {
+                        "icon": (
+                            "mdi-checkbox-marked"
+                            if thash in self._selected
+                            else "mdi-checkbox-blank-outline"
+                        ),
+                        "size": "x-small",
+                        "variant": "text",
+                        "color": (
+                            "primary" if thash in self._selected else "medium-emphasis"
+                        ),
+                        "class": "mr-1",
+                    },
+                    "events": {
+                        "click": {
+                            "api": toggle_select_api,
+                            "method": "post",
+                            "params": {"hash": thash, "downloader": dl_name},
+                        }
+                    },
+                })
+            dl_col_content.append({
+                "component": "VChip",
+                "props": {"size": "x-small", "color": "primary", "variant": "tonal"},
+                "text": dl_name or "-",
+            })
             row_content = [
                 {
                     "component": "VCol",
-                    "props": {"cols": 12, "md": 3},
-                    "content": [
-                        {
-                            "component": "VChip",
-                            "props": {"size": "x-small", "color": "primary", "variant": "tonal"},
-                            "text": dl_name or "-",
-                        }
-                    ],
+                    "props": {"cols": 12, "md": 2},
+                    "content": dl_col_content,
                 },
                 {
                     "component": "VCol",
-                    "props": {"cols": 12, "md": 6},
+                    "props": {"cols": 12, "md": 5},
                     "content": path_col_content,
+                },
+                {
+                    "component": "VCol",
+                    "props": {"cols": 12, "md": 2},
+                    "content": [{
+                        "component": "div",
+                        "props": {"class": "d-flex flex-wrap"},
+                        "content": meta_chips,
+                    }] if meta_chips else [],
                 },
             ]
             if show_delete and thash and dl_name:
@@ -805,17 +1185,29 @@ class CrossSeedView(_PluginBase):
                                     "class": "mr-1",
                                 },
                                 "text": "仅删种",
-                                "events": {
-                                    "click": {
-                                        "api": delete_api,
-                                        "method": "post",
-                                        "params": {
-                                            "hash": thash,
-                                            "downloader": dl_name,
-                                            "delete_files": False,
-                                        },
-                                    }
-                                },
+                                "content": [{
+                                    "component": "VMenu",
+                                    "props": {"activator": "parent", "close-on-content-click": True},
+                                    "content": [{
+                                        "component": "VList",
+                                        "props": {"density": "compact"},
+                                        "content": [{
+                                            "component": "VListItem",
+                                            "props": {"prepend-icon": "mdi-check", "title": "确认仅删种（保留文件）"},
+                                            "events": {
+                                                "click": {
+                                                    "api": delete_api,
+                                                    "method": "post",
+                                                    "params": {
+                                                        "hash": thash,
+                                                        "downloader": dl_name,
+                                                        "delete_files": False,
+                                                    },
+                                                }
+                                            },
+                                        }],
+                                    }],
+                                }],
                             },
                             {
                                 "component": "VBtn",
@@ -825,17 +1217,29 @@ class CrossSeedView(_PluginBase):
                                     "size": "x-small",
                                 },
                                 "text": "删种+文件",
-                                "events": {
-                                    "click": {
-                                        "api": delete_api,
-                                        "method": "post",
-                                        "params": {
-                                            "hash": thash,
-                                            "downloader": dl_name,
-                                            "delete_files": True,
-                                        },
-                                    }
-                                },
+                                "content": [{
+                                    "component": "VMenu",
+                                    "props": {"activator": "parent", "close-on-content-click": True},
+                                    "content": [{
+                                        "component": "VList",
+                                        "props": {"density": "compact"},
+                                        "content": [{
+                                            "component": "VListItem",
+                                            "props": {"prepend-icon": "mdi-alert", "title": "确认删种+文件（不可撤销）", "class": "text-error"},
+                                            "events": {
+                                                "click": {
+                                                    "api": delete_api,
+                                                    "method": "post",
+                                                    "params": {
+                                                        "hash": thash,
+                                                        "downloader": dl_name,
+                                                        "delete_files": True,
+                                                    },
+                                                }
+                                            },
+                                        }],
+                                    }],
+                                }],
                             },
                         ],
                     }
@@ -851,6 +1255,144 @@ class CrossSeedView(_PluginBase):
             }
 
         card_list_content: List[dict] = []
+
+        # 批量选择工具栏：仅在允许删除时展示
+        if self._allow_delete:
+            selected_count = len(self._selected)
+            toolbar_children: List[dict] = [
+                {
+                    "component": "VChip",
+                    "props": {
+                        "size": "small",
+                        "color": "primary" if selected_count > 0 else "default",
+                        "variant": "tonal",
+                        "class": "mr-2",
+                        "prepend-icon": "mdi-checkbox-multiple-marked-outline",
+                    },
+                    "text": f"已选 {selected_count} 项 / 当前可见 {len(visible)} 条",
+                },
+                {
+                    "component": "VBtn",
+                    "props": {
+                        "size": "small",
+                        "variant": "outlined",
+                        "color": "primary",
+                        "prepend-icon": "mdi-select-all",
+                        "class": "mr-1",
+                    },
+                    "text": "全选",
+                    "events": {"click": {"api": select_all_api, "method": "get"}},
+                },
+                {
+                    "component": "VBtn",
+                    "props": {
+                        "size": "small",
+                        "variant": "outlined",
+                        "color": "secondary",
+                        "prepend-icon": "mdi-select-inverse",
+                        "class": "mr-1",
+                    },
+                    "text": "反选",
+                    "events": {"click": {"api": select_invert_api, "method": "get"}},
+                },
+                {
+                    "component": "VBtn",
+                    "props": {
+                        "size": "small",
+                        "variant": "text",
+                        "prepend-icon": "mdi-close-circle-outline",
+                        "class": "mr-1",
+                    },
+                    "text": "清空",
+                    "events": {"click": {"api": select_clear_api, "method": "get"}},
+                },
+            ]
+            toolbar_children.append(
+                {
+                    "component": "VBtn",
+                    "props": {
+                        "size": "small",
+                        "color": "warning",
+                        "variant": "outlined",
+                        "prepend-icon": "mdi-trash-can-outline",
+                        "class": "mr-1",
+                        "disabled": selected_count == 0,
+                    },
+                    "text": "批量仅删种",
+                    "content": [{
+                        "component": "VMenu",
+                        "props": {"activator": "parent", "close-on-content-click": True},
+                        "content": [{
+                            "component": "VList",
+                            "props": {"density": "compact"},
+                            "content": [{
+                                "component": "VListItem",
+                                "props": {
+                                    "prepend-icon": "mdi-check",
+                                    "title": f"确认批量仅删种（{selected_count} 项，保留文件）",
+                                },
+                                "events": {
+                                    "click": {
+                                        "api": batch_delete_api,
+                                        "method": "post",
+                                        "params": {"delete_files": False},
+                                    }
+                                },
+                            }],
+                        }],
+                    }],
+                }
+            )
+            toolbar_children.append(
+                {
+                    "component": "VBtn",
+                    "props": {
+                        "size": "small",
+                        "color": "error",
+                        "variant": "flat",
+                        "prepend-icon": "mdi-delete-alert",
+                        "disabled": selected_count == 0,
+                    },
+                    "text": "批量删种+文件",
+                    "content": [{
+                        "component": "VMenu",
+                        "props": {"activator": "parent", "close-on-content-click": True},
+                        "content": [{
+                            "component": "VList",
+                            "props": {"density": "compact"},
+                            "content": [{
+                                "component": "VListItem",
+                                "props": {
+                                    "prepend-icon": "mdi-alert",
+                                    "title": f"确认批量删种+文件（{selected_count} 项，不可撤销）",
+                                    "class": "text-error",
+                                },
+                                "events": {
+                                    "click": {
+                                        "api": batch_delete_api,
+                                        "method": "post",
+                                        "params": {"delete_files": True},
+                                    }
+                                },
+                            }],
+                        }],
+                    }],
+                }
+            )
+            card_list_content.append(
+                {
+                    "component": "VCard",
+                    "props": {"variant": "tonal", "class": "mb-2 pa-2"},
+                    "content": [
+                        {
+                            "component": "div",
+                            "props": {"class": "d-flex flex-wrap align-center"},
+                            "content": toolbar_children,
+                        }
+                    ],
+                }
+            )
+
         if not items:
             card_list_content.append(
                 {
@@ -910,7 +1452,25 @@ class CrossSeedView(_PluginBase):
                             },
                             "text": it["downloaders_text"],
                         },
-                    ],
+                    ] + (
+                        [{
+                            "component": "VChip",
+                            "props": {"size": "x-small", "color": "secondary", "variant": "tonal", "class": "ml-2"},
+                            "text": it.get("state") or "",
+                        }] if it.get("state") else []
+                    ) + (
+                        [{
+                            "component": "VChip",
+                            "props": {"size": "x-small", "color": "info", "variant": "tonal", "class": "ml-2"},
+                            "text": "⏱ " + self._fmt_duration(it.get("max_seeding_time", 0)),
+                        }] if (it.get("max_seeding_time") or 0) > 0 else []
+                    ) + (
+                        [{
+                            "component": "VChip",
+                            "props": {"size": "x-small", "color": "success", "variant": "tonal", "class": "ml-2"},
+                            "text": "↑ " + self._fmt_size(it.get("total_uploaded", 0)),
+                        }] if (it.get("total_uploaded") or 0) > 0 else []
+                    ),
                 }
                 torrent_rows = [_torrent_row(t, show_delete) for t in torrents]
                 expand_content = torrent_rows or [
@@ -1110,6 +1670,7 @@ class CrossSeedView(_PluginBase):
                 ],
             },
             summary_row,
+            summary_row_extra,
             preset_row,
             {
                 "component": "VCard",
@@ -1174,13 +1735,16 @@ class CrossSeedView(_PluginBase):
                 "downloaders": set(),
                 "save_paths": set(),
                 "torrents": [],
+                "max_seeding_time": 0,
+                "total_uploaded": 0,
+                "states": [],
             }
         )
         total_torrents = 0
         for dl_name, tors in torrents_by_dl.items():
             for t in tors:
                 try:
-                    name, size, save_path, thash = self._extract_torrent_meta(t)
+                    name, size, save_path, thash, state, seeding_time, uploaded = self._extract_torrent_meta(t)
                 except Exception as err:
                     logger.debug(f"[CrossSeedView] 解析种子失败：{err}")
                     continue
@@ -1199,11 +1763,27 @@ class CrossSeedView(_PluginBase):
                     "hash": thash,
                     "downloader": dl_name,
                     "save_path": save_path,
+                    "state": state,
+                    "seeding_time": seeding_time,
+                    "uploaded": uploaded,
                 })
+                if seeding_time > entry["max_seeding_time"]:
+                    entry["max_seeding_time"] = seeding_time
+                entry["total_uploaded"] += uploaded
+                if state:
+                    entry["states"].append(state)
 
         groups: List[Dict[str, Any]] = []
         cross_groups = 0
+        orphan_groups = 0
+        total_uploaded_all = 0
+        redundant_bytes = 0  # 冗余占用：辅种组内多余副本占用的空间 = size * (count-1)
         for entry in groups_map.values():
+            # 代表状态：取出现次数最多的
+            rep_state = ""
+            if entry["states"]:
+                from collections import Counter as _Counter
+                rep_state = _Counter(entry["states"]).most_common(1)[0][0]
             g = {
                 "name": entry["name"],
                 "size": entry["size"],
@@ -1211,10 +1791,17 @@ class CrossSeedView(_PluginBase):
                 "downloaders": sorted(entry["downloaders"]),
                 "save_paths": sorted(entry["save_paths"]),
                 "torrents": entry["torrents"],
+                "max_seeding_time": entry["max_seeding_time"],
+                "total_uploaded": entry["total_uploaded"],
+                "state": rep_state,
             }
             groups.append(g)
+            total_uploaded_all += entry["total_uploaded"]
             if g["count"] >= 2:
                 cross_groups += 1
+                redundant_bytes += g["size"] * (g["count"] - 1)
+            else:
+                orphan_groups += 1
 
         snapshot = {
             "groups": groups,
@@ -1222,6 +1809,9 @@ class CrossSeedView(_PluginBase):
             "total_torrents": total_torrents,
             "total_groups": len(groups),
             "cross_groups": cross_groups,
+            "orphan_groups": orphan_groups,
+            "redundant_bytes": redundant_bytes,
+            "total_uploaded": total_uploaded_all,
             "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "error": "；".join(errors),
         }
@@ -1238,23 +1828,30 @@ class CrossSeedView(_PluginBase):
         )
 
     @staticmethod
-    def _extract_torrent_meta(t: Any) -> Tuple[str, int, str, str]:
-        """从下载器返回的种子对象中提取 (name, size, save_path, hash)。兼容 qb/tr 两种对象。"""
-        # qBittorrent: 属性 name、size、save_path/content_path
+    def _extract_torrent_meta(t: Any) -> Tuple[str, int, str, str, str, int, int]:
+        """从下载器返回的种子对象中提取 (name, size, save_path, hash, state, seeding_time_sec, uploaded_bytes)。
+        兼容 qb/tr 两种对象。"""
         name = ""
         size = 0
         save_path = ""
         thash = ""
+        state = ""
+        seeding_time = 0
+        uploaded = 0
 
-        # 常见字段
+        def _get(obj: Any, key: str) -> Any:
+            if isinstance(obj, dict):
+                return obj.get(key)
+            return getattr(obj, key, None)
+
         for attr in ("name",):
-            v = getattr(t, attr, None) or (t.get(attr) if isinstance(t, dict) else None)
+            v = _get(t, attr)
             if v:
                 name = str(v)
                 break
 
         for attr in ("size", "total_size", "totalSize"):
-            v = getattr(t, attr, None) if not isinstance(t, dict) else t.get(attr)
+            v = _get(t, attr)
             if v is not None:
                 try:
                     size = int(v)
@@ -1263,18 +1860,42 @@ class CrossSeedView(_PluginBase):
                     continue
 
         for attr in ("save_path", "download_dir", "downloadDir", "content_path"):
-            v = getattr(t, attr, None) if not isinstance(t, dict) else t.get(attr)
+            v = _get(t, attr)
             if v:
                 save_path = str(v)
                 break
 
         for attr in ("hash", "hashString", "hash_string"):
-            v = getattr(t, attr, None) if not isinstance(t, dict) else t.get(attr)
+            v = _get(t, attr)
             if v:
                 thash = str(v)
                 break
 
-        return name, size, save_path, thash
+        for attr in ("state", "status"):
+            v = _get(t, attr)
+            if v is not None and v != "":
+                state = str(v)
+                break
+
+        for attr in ("seeding_time", "seedingTime", "time_active", "timeActive"):
+            v = _get(t, attr)
+            if v is not None:
+                try:
+                    seeding_time = int(v)
+                    break
+                except (TypeError, ValueError):
+                    continue
+
+        for attr in ("uploaded", "total_uploaded", "totalUploaded", "uploadedEver"):
+            v = _get(t, attr)
+            if v is not None:
+                try:
+                    uploaded = int(v)
+                    break
+                except (TypeError, ValueError):
+                    continue
+
+        return name, size, save_path, thash, state, seeding_time, uploaded
 
     @staticmethod
     def _fmt_size(num: int) -> str:
@@ -1287,6 +1908,23 @@ class CrossSeedView(_PluginBase):
                 return f"{n:.2f} {unit}"
             n /= 1024.0
         return f"{n:.2f} EB"
+
+    @staticmethod
+    def _fmt_duration(seconds: int) -> str:
+        try:
+            s = int(seconds)
+        except (TypeError, ValueError):
+            return "-"
+        if s <= 0:
+            return "-"
+        days, rem = divmod(s, 86400)
+        hours, rem = divmod(rem, 3600)
+        minutes = rem // 60
+        if days > 0:
+            return f"{days}d{hours}h"
+        if hours > 0:
+            return f"{hours}h{minutes}m"
+        return f"{minutes}m"
 
     @staticmethod
     def _stat_card(title: str, value: Any, color: str) -> dict:
