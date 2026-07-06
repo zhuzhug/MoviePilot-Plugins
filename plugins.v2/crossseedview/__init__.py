@@ -42,7 +42,7 @@ class CrossSeedView(_PluginBase):
     plugin_name = "辅种查看"
     plugin_desc = "扫描所有下载器种子，按“种子名+大小”识别辅种关系，用可折叠卡片展示辅种数量、保存路径与明细，支持交互筛选与可选删除。"
     plugin_icon = "seed.png"
-    plugin_version = "0.4.1"
+    plugin_version = "0.4.2"
     plugin_label = "下载器"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "crossseedview_"
@@ -650,6 +650,65 @@ class CrossSeedView(_PluginBase):
                 btn["events"] = {"click": {"api": save_api, "method": "post", "params": data}}
             return btn
 
+        # 聚合 Top 8 常见保存路径（基于全量分组的 torrents 出现次数）
+        path_counter: Dict[str, int] = {}
+        for g in groups:
+            for t in (g.get("torrents") or []):
+                sp = str((t or {}).get("save_path") or "").strip()
+                if sp:
+                    path_counter[sp] = path_counter.get(sp, 0) + 1
+        top_paths = sorted(path_counter.items(), key=lambda kv: (-kv[1], kv[0]))[:8]
+
+        def _short_path(p: str, keep: int = 24) -> str:
+            if len(p) <= keep:
+                return p
+            # 保留最后 keep 字符，前面用 …
+            return "…" + p[-keep:]
+
+        top_path_row_content: List[dict] = []
+        if top_paths:
+            top_path_row_content.append(
+                {
+                    "component": "span",
+                    "props": {"class": "text-caption mr-3"},
+                    "text": "常见目录：",
+                }
+            )
+            for p, cnt in top_paths:
+                btn = _preset_btn(f"{_short_path(p)} ({cnt})", "grey", {"path_keyword": p})
+                # 高亮当前激活的目录
+                if self._path_keyword and self._path_keyword == p:
+                    btn["props"]["variant"] = "flat"
+                    btn["props"]["color"] = "success"
+                top_path_row_content.append(btn)
+
+        preset_row_children: List[dict] = [
+            {
+                "component": "div",
+                "props": {"class": "d-flex flex-wrap align-center"},
+                "content": [
+                    {
+                        "component": "span",
+                        "props": {"class": "text-caption mr-3"},
+                        "text": "快捷筛选：",
+                    },
+                    _preset_btn("全部", "primary", {"min_count": 2, "max_count": 0}),
+                    _preset_btn("仅孤种", "warning", {"min_count": 1, "max_count": 1}),
+                    _preset_btn("多辅种", "success", {"min_count": 3, "max_count": 0}),
+                    _preset_btn("大文件", "info", {"size_min_gb": 10}),
+                    _preset_btn("重置", "secondary", None, is_clear=True),
+                ],
+            }
+        ]
+        if top_path_row_content:
+            preset_row_children.append(
+                {
+                    "component": "div",
+                    "props": {"class": "d-flex flex-wrap align-center mt-1"},
+                    "content": top_path_row_content,
+                }
+            )
+
         preset_row = {
             "component": "VCard",
             "props": {"variant": "outlined", "class": "mb-2"},
@@ -657,24 +716,7 @@ class CrossSeedView(_PluginBase):
                 {
                     "component": "VCardText",
                     "props": {"class": "py-2"},
-                    "content": [
-                        {
-                            "component": "div",
-                            "props": {"class": "d-flex flex-wrap align-center"},
-                            "content": [
-                                {
-                                    "component": "span",
-                                    "props": {"class": "text-caption mr-3"},
-                                    "text": "快捷筛选：",
-                                },
-                                _preset_btn("全部", "primary", {"min_count": 2, "max_count": 0}),
-                                _preset_btn("仅孤种", "warning", {"min_count": 1, "max_count": 1}),
-                                _preset_btn("多辅种", "success", {"min_count": 3, "max_count": 0}),
-                                _preset_btn("大文件", "info", {"size_min_gb": 10}),
-                                _preset_btn("重置", "secondary", None, is_clear=True),
-                            ],
-                        }
-                    ],
+                    "content": preset_row_children,
                 }
             ],
         }
@@ -686,7 +728,50 @@ class CrossSeedView(_PluginBase):
         def _torrent_row(t: dict, show_delete: bool) -> dict:
             thash = str(t.get("hash") or "")
             dl_name = str(t.get("downloader") or "")
-            save_path = str(t.get("save_path") or "-")
+            save_path = str(t.get("save_path") or "")
+            display_path = save_path or "-"
+            # 命中当前 path_keyword 时高亮该行
+            hit_path = bool(path_kw and save_path and path_kw in save_path.lower())
+            row_props = {"dense": True, "class": "align-center py-1"}
+            if hit_path:
+                row_props["style"] = "background-color: rgba(76,175,80,0.10); border-left: 3px solid #4caf50;"
+            path_col_content = [
+                {
+                    "component": "div",
+                    "props": {
+                        "class": "text-caption text-medium-emphasis text-truncate",
+                        "style": "user-select: text;",
+                    },
+                    "text": display_path,
+                },
+                {
+                    "component": "div",
+                    "props": {"class": "text-caption text-disabled", "style": "user-select: text;"},
+                    "text": f"hash: {thash[:16]}..." if thash else "hash: -",
+                },
+            ]
+            # 「筛选此路径」按钮：将此行 save_path 写入 path_keyword
+            if save_path:
+                path_col_content.append(
+                    {
+                        "component": "VBtn",
+                        "props": {
+                            "color": "secondary",
+                            "variant": "text",
+                            "size": "x-small",
+                            "prepend-icon": "mdi-filter-variant",
+                            "class": "mt-1 px-2",
+                        },
+                        "text": "筛选此路径",
+                        "events": {
+                            "click": {
+                                "api": save_api,
+                                "method": "post",
+                                "params": {"path_keyword": save_path},
+                            }
+                        },
+                    }
+                )
             row_content = [
                 {
                     "component": "VCol",
@@ -702,18 +787,7 @@ class CrossSeedView(_PluginBase):
                 {
                     "component": "VCol",
                     "props": {"cols": 12, "md": 6},
-                    "content": [
-                        {
-                            "component": "div",
-                            "props": {"class": "text-caption text-medium-emphasis text-truncate"},
-                            "text": save_path,
-                        },
-                        {
-                            "component": "div",
-                            "props": {"class": "text-caption text-disabled"},
-                            "text": f"hash: {thash[:16]}..." if thash else "hash: -",
-                        },
-                    ],
+                    "content": path_col_content,
                 },
             ]
             if show_delete and thash and dl_name:
@@ -772,7 +846,7 @@ class CrossSeedView(_PluginBase):
                 )
             return {
                 "component": "VRow",
-                "props": {"dense": True, "class": "align-center py-1"},
+                "props": row_props,
                 "content": row_content,
             }
 
@@ -789,87 +863,96 @@ class CrossSeedView(_PluginBase):
                 }
             )
         else:
-            expansion_items = []
+            group_cards: List[dict] = []
             for idx, it in enumerate(items):
                 show_delete = self._allow_delete and idx < MAX_DELETE_CARDS
                 torrents = it.get("torrents") or []
-                # 折叠面板标题：名称 + 概要 chips
-                panel_title_content = [
+                name_text = it["name"]
+                # 卡片头：名称 + 概要 chips（名称可选中复制，不触发展开）
+                header_row = {
+                    "component": "div",
+                    "props": {"class": "d-flex flex-wrap align-center px-4 pt-3 pb-2"},
+                    "content": [
+                        {
+                            "component": "div",
+                            "props": {
+                                "class": "text-subtitle-2 mr-3",
+                                "style": "flex: 1 1 auto; min-width: 0; user-select: text; cursor: text; word-break: break-all;",
+                            },
+                            "text": name_text,
+                        },
+                        {
+                            "component": "VChip",
+                            "props": {
+                                "size": "x-small",
+                                "color": "success",
+                                "variant": "tonal",
+                                "class": "mr-2",
+                            },
+                            "text": f"辅种 {it['count']}",
+                        },
+                        {
+                            "component": "VChip",
+                            "props": {
+                                "size": "x-small",
+                                "color": "info",
+                                "variant": "tonal",
+                                "class": "mr-2",
+                            },
+                            "text": it["size_text"],
+                        },
+                        {
+                            "component": "VChip",
+                            "props": {
+                                "size": "x-small",
+                                "color": "primary",
+                                "variant": "tonal",
+                            },
+                            "text": it["downloaders_text"],
+                        },
+                    ],
+                }
+                torrent_rows = [_torrent_row(t, show_delete) for t in torrents]
+                expand_content = torrent_rows or [
                     {
                         "component": "div",
-                        "props": {"class": "d-flex flex-wrap align-center w-100"},
-                        "content": [
-                            {
-                                "component": "div",
-                                "props": {
-                                    "class": "text-subtitle-2 text-truncate mr-3",
-                                    "style": "flex: 1 1 auto; min-width: 0;",
-                                },
-                                "text": it["name"],
-                            },
-                            {
-                                "component": "VChip",
-                                "props": {
-                                    "size": "x-small",
-                                    "color": "success",
-                                    "variant": "tonal",
-                                    "class": "mr-2",
-                                },
-                                "text": f"辅种 {it['count']}",
-                            },
-                            {
-                                "component": "VChip",
-                                "props": {
-                                    "size": "x-small",
-                                    "color": "info",
-                                    "variant": "tonal",
-                                    "class": "mr-2",
-                                },
-                                "text": it["size_text"],
-                            },
-                            {
-                                "component": "VChip",
-                                "props": {
-                                    "size": "x-small",
-                                    "color": "primary",
-                                    "variant": "tonal",
-                                },
-                                "text": it["downloaders_text"],
-                            },
-                        ],
+                        "props": {"class": "text-caption text-disabled"},
+                        "text": "无种子明细",
                     }
                 ]
-                torrent_rows = [_torrent_row(t, show_delete) for t in torrents]
-                expansion_items.append(
+                expansion_panel = {
+                    "component": "VExpansionPanels",
+                    "props": {"variant": "accordion", "flat": True, "class": "cross-seed-inner-panels"},
+                    "content": [
+                        {
+                            "component": "VExpansionPanel",
+                            "content": [
+                                {
+                                    "component": "VExpansionPanelTitle",
+                                    "props": {"class": "py-1 text-caption text-medium-emphasis", "static": False},
+                                    "content": [
+                                        {
+                                            "component": "span",
+                                            "text": f"点击展开 {int(it['count']) or len(torrents)} 个副本明细",
+                                        }
+                                    ],
+                                },
+                                {
+                                    "component": "VExpansionPanelText",
+                                    "content": expand_content,
+                                },
+                            ],
+                        }
+                    ],
+                }
+                group_cards.append(
                     {
-                        "component": "VExpansionPanel",
-                        "content": [
-                            {
-                                "component": "VExpansionPanelTitle",
-                                "props": {"class": "py-2"},
-                                "content": panel_title_content,
-                            },
-                            {
-                                "component": "VExpansionPanelText",
-                                "content": torrent_rows
-                                or [
-                                    {
-                                        "component": "div",
-                                        "props": {"class": "text-caption text-disabled"},
-                                        "text": "无种子明细",
-                                    }
-                                ],
-                            },
-                        ],
+                        "component": "VCard",
+                        "props": {"variant": "outlined", "class": "mb-2"},
+                        "content": [header_row, expansion_panel],
                     }
                 )
-            card_list_content.append(
-                {
-                    "component": "VExpansionPanels",
-                    "props": {"variant": "accordion", "multiple": True},
-                    "content": expansion_items,
-                }
-            )
+            card_list_content.extend(group_cards)
             if self._allow_delete and len(items) > MAX_DELETE_CARDS:
                 card_list_content.append(
                     {
