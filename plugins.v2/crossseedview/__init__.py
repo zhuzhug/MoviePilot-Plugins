@@ -58,7 +58,7 @@ class CrossSeedView(_PluginBase):
     plugin_name = "辅种查看"
     plugin_desc = "扫描所有下载器种子，按“种子名+大小”识别辅种关系，用可折叠卡片展示辅种数量、保存路径与明细，支持交互筛选与可选删除。"
     plugin_icon = "seed.png"
-    plugin_version = "0.5.2"
+    plugin_version = "0.5.3"
     plugin_label = "下载器"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "crossseedview_"
@@ -926,17 +926,48 @@ class CrossSeedView(_PluginBase):
             # 保留最后 keep 字符，前面用 …
             return "…" + p[-keep:]
 
+        def _common_dir_prefix(paths: List[str]) -> str:
+            """求路径列表的公共目录前缀（按 / 分段，至少留 1 段完整目录，末尾带 /）。"""
+            if len(paths) < 2:
+                return ""
+            # 统一分隔符
+            segs_list = [p.replace("\\", "/").split("/") for p in paths]
+            common: List[str] = []
+            for parts in zip(*segs_list):
+                if len(set(parts)) == 1:
+                    common.append(parts[0])
+                else:
+                    break
+            # 至少要有两段（比如 "" + "media"），且不能把整条路径都吃掉
+            if len(common) < 2:
+                return ""
+            if any(len(segs) == len(common) for segs in segs_list):
+                # 有路径本身就等于公共前缀，别裁到只剩空
+                common = common[:-1]
+                if len(common) < 2:
+                    return ""
+            prefix = "/".join(common)
+            return prefix + "/" if prefix else ""
+
         top_path_row_content: List[dict] = []
         if top_paths:
+            paths_only = [p for p, _ in top_paths]
+            common_prefix = _common_dir_prefix(paths_only)
+            header_text = "常见目录："
+            if common_prefix:
+                header_text = f"常见目录（公共前缀 {common_prefix}）："
             top_path_row_content.append(
                 {
                     "component": "span",
                     "props": {"class": "text-caption mr-3"},
-                    "text": "常见目录：",
+                    "text": header_text,
                 }
             )
             for p, cnt in top_paths:
-                btn = _preset_btn(f"{_short_path(p)} ({cnt})", "grey", {"path_keyword": p})
+                # 显示时去掉公共前缀；params 仍传完整路径保证过滤精确匹配
+                short = p[len(common_prefix):] if common_prefix and p.startswith(common_prefix) else p
+                short = short or "."
+                btn = _preset_btn(f"{_short_path(short)} ({cnt})", "grey", {"path_keyword": p})
                 # 高亮当前激活的目录
                 if self._path_keyword and self._path_keyword == p:
                     btn["props"]["variant"] = "flat"
