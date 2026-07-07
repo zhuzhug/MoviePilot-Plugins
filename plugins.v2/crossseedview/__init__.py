@@ -45,6 +45,12 @@ class ToggleSelectParams(BaseModel):
     downloader: str = Field(..., description="下载器名称")
 
 
+class ToggleSelectGroupParams(BaseModel):
+    """切换一组种子（分组内所有种子）的选中状态。"""
+
+    torrents: List[Dict[str, str]] = Field(..., description="种子列表 [{hash, downloader}]")
+
+
 class BatchDeleteParams(BaseModel):
     """批量删除已选中的种子。"""
 
@@ -58,7 +64,7 @@ class CrossSeedView(_PluginBase):
     plugin_name = "辅种查看"
     plugin_desc = "扫描所有下载器种子，按“种子名+大小”识别辅种关系，用可折叠卡片展示辅种数量、保存路径与明细，支持交互筛选与可选删除。"
     plugin_icon = "seed.png"
-    plugin_version = "0.5.3"
+    plugin_version = "0.5.4"
     plugin_label = "下载器"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "crossseedview_"
@@ -202,6 +208,13 @@ class CrossSeedView(_PluginBase):
                 "methods": ["POST"],
                 "auth": "bear",
                 "summary": "切换单个种子的选中状态",
+            },
+            {
+                "path": "/toggle_select_group",
+                "endpoint": self.toggle_select_group,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "切换一组种子的选中状态",
             },
             {
                 "path": "/select_all",
@@ -352,6 +365,30 @@ class CrossSeedView(_PluginBase):
             del self._selected[h]
         else:
             self._selected[h] = params.downloader
+        return Response(success=True, message=f"已选 {len(self._selected)} 项")
+
+    def toggle_select_group(self, params: ToggleSelectGroupParams) -> Response:
+        """切换一组种子的选中状态。
+
+        规则：若组内所有种子已全部选中 -> 全部取消；否则 -> 全部添加。
+        """
+        if not self._enabled:
+            return Response(success=False, message="插件未启用")
+        pairs: List[Tuple[str, str]] = []
+        for t in params.torrents or []:
+            h = str(t.get("hash") or "")
+            dl = str(t.get("downloader") or "")
+            if h and dl:
+                pairs.append((h, dl))
+        if not pairs:
+            return Response(success=False, message="参数不完整")
+        all_selected = all(h in self._selected for h, _ in pairs)
+        if all_selected:
+            for h, _ in pairs:
+                self._selected.pop(h, None)
+        else:
+            for h, dl in pairs:
+                self._selected[h] = dl
         return Response(success=True, message=f"已选 {len(self._selected)} 项")
 
     def select_all(self) -> Response:
@@ -1063,6 +1100,7 @@ class CrossSeedView(_PluginBase):
         # 采用相对路径，前端 axios 自动携带鉴权，成功后自动触发 action 事件重新拉取 get_page
         delete_api = "plugin/CrossSeedView/delete_torrent"
         toggle_select_api = "plugin/CrossSeedView/toggle_select"
+        toggle_select_group_api = "plugin/CrossSeedView/toggle_select_group"
         batch_delete_api = "plugin/CrossSeedView/batch_delete"
         MAX_DELETE_CARDS = 50
 
@@ -1404,6 +1442,63 @@ class CrossSeedView(_PluginBase):
                 show_delete = self._allow_delete and idx < MAX_DELETE_CARDS
                 torrents = it.get("torrents") or []
                 name_text = it["name"]
+                # 组头复选框：计算组的选中状态
+                group_pairs = [
+                    {"hash": str(t.get("hash") or ""), "downloader": str(t.get("downloader") or "")}
+                    for t in torrents
+                    if t.get("hash") and t.get("downloader")
+                ]
+                sel_count = sum(1 for p in group_pairs if p["hash"] in self._selected)
+                if sel_count == 0:
+                    group_icon = "mdi-checkbox-blank-outline"
+                    group_icon_color = "medium-emphasis"
+                elif sel_count == len(group_pairs):
+                    group_icon = "mdi-checkbox-marked"
+                    group_icon_color = "primary"
+                else:
+                    group_icon = "mdi-checkbox-intermediate"
+                    group_icon_color = "primary"
+                group_checkbox_btn: List[dict] = []
+                if show_delete and group_pairs:
+                    if len(group_pairs) == 1:
+                        # 单种子组：直接切换该种子
+                        p = group_pairs[0]
+                        group_checkbox_btn.append({
+                            "component": "VBtn",
+                            "props": {
+                                "icon": group_icon,
+                                "size": "small",
+                                "variant": "text",
+                                "color": group_icon_color,
+                                "class": "ml-2",
+                            },
+                            "events": {
+                                "click": {
+                                    "api": toggle_select_api,
+                                    "method": "post",
+                                    "params": {"hash": p["hash"], "downloader": p["downloader"]},
+                                }
+                            },
+                        })
+                    else:
+                        # 多种子组：一次切换全组
+                        group_checkbox_btn.append({
+                            "component": "VBtn",
+                            "props": {
+                                "icon": group_icon,
+                                "size": "small",
+                                "variant": "text",
+                                "color": group_icon_color,
+                                "class": "ml-2",
+                            },
+                            "events": {
+                                "click": {
+                                    "api": toggle_select_group_api,
+                                    "method": "post",
+                                    "params": {"torrents": group_pairs},
+                                }
+                            },
+                        })
                 # 卡片头：名称 + 概要 chips（名称可选中复制，不触发展开）
                 header_row = {
                     "component": "div",
@@ -1464,7 +1559,7 @@ class CrossSeedView(_PluginBase):
                             "props": {"size": "x-small", "color": "success", "variant": "tonal", "class": "ml-2"},
                             "text": "↑ " + self._fmt_size(it.get("total_uploaded", 0)),
                         }] if (it.get("total_uploaded") or 0) > 0 else []
-                    ),
+                    ) + group_checkbox_btn,
                 }
                 torrent_rows = [_torrent_row(t, show_delete) for t in torrents]
                 expand_content = torrent_rows or [
