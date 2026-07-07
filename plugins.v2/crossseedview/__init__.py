@@ -58,7 +58,7 @@ class CrossSeedView(_PluginBase):
     plugin_name = "辅种查看"
     plugin_desc = "扫描所有下载器种子，按“种子名+大小”识别辅种关系，用可折叠卡片展示辅种数量、保存路径与明细，支持交互筛选与可选删除。"
     plugin_icon = "seed.png"
-    plugin_version = "0.5.1"
+    plugin_version = "0.5.2"
     plugin_label = "下载器"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "crossseedview_"
@@ -1032,9 +1032,6 @@ class CrossSeedView(_PluginBase):
         # 采用相对路径，前端 axios 自动携带鉴权，成功后自动触发 action 事件重新拉取 get_page
         delete_api = "plugin/CrossSeedView/delete_torrent"
         toggle_select_api = "plugin/CrossSeedView/toggle_select"
-        select_all_api = "plugin/CrossSeedView/select_all"
-        select_invert_api = "plugin/CrossSeedView/select_invert"
-        select_clear_api = "plugin/CrossSeedView/select_clear"
         batch_delete_api = "plugin/CrossSeedView/batch_delete"
         MAX_DELETE_CARDS = 50
 
@@ -1271,41 +1268,6 @@ class CrossSeedView(_PluginBase):
                         "prepend-icon": "mdi-checkbox-multiple-marked-outline",
                     },
                     "text": f"已选 {selected_count} 项 / 当前可见 {len(visible)} 条",
-                },
-                {
-                    "component": "VBtn",
-                    "props": {
-                        "size": "small",
-                        "variant": "outlined",
-                        "color": "primary",
-                        "prepend-icon": "mdi-select-all",
-                        "class": "mr-1",
-                    },
-                    "text": "全选",
-                    "events": {"click": {"api": select_all_api, "method": "get"}},
-                },
-                {
-                    "component": "VBtn",
-                    "props": {
-                        "size": "small",
-                        "variant": "outlined",
-                        "color": "secondary",
-                        "prepend-icon": "mdi-select-inverse",
-                        "class": "mr-1",
-                    },
-                    "text": "反选",
-                    "events": {"click": {"api": select_invert_api, "method": "get"}},
-                },
-                {
-                    "component": "VBtn",
-                    "props": {
-                        "size": "small",
-                        "variant": "text",
-                        "prepend-icon": "mdi-close-circle-outline",
-                        "class": "mr-1",
-                    },
-                    "text": "清空",
-                    "events": {"click": {"api": select_clear_api, "method": "get"}},
                 },
             ]
             toolbar_children.append(
