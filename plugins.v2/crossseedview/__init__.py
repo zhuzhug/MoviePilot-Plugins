@@ -7,12 +7,18 @@ import pytz
 from apscheduler.triggers.cron import CronTrigger
 from pydantic import BaseModel, Field
 
+from app import schemas
 from app.chain import ChainBase
+from app.chain.storage import StorageChain
 from app.core.config import settings
+from app.core.event import eventmanager
+from app.db.downloadhistory_oper import DownloadHistoryOper
+from app.db.transferhistory_oper import TransferHistoryOper
 from app.helper.downloader import DownloaderHelper
 from app.log import logger
 from app.plugins import _PluginBase
 from app.schemas import Response
+from app.schemas.types import EventType
 
 
 class SaveFiltersParams(BaseModel):
@@ -64,7 +70,7 @@ class CrossSeedView(_PluginBase):
     plugin_name = "辅种查看"
     plugin_desc = "扫描所有下载器种子，按“种子名+大小”识别辅种关系，用可折叠卡片展示辅种数量、保存路径与明细，支持交互筛选与可选删除。"
     plugin_icon = "seed.png"
-    plugin_version = "0.5.6"
+    plugin_version = "0.5.7"
     plugin_label = "下载器"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "crossseedview_"
@@ -318,6 +324,96 @@ class CrossSeedView(_PluginBase):
             return Response(success=False, message=f"重置失败：{err}")
         return Response(success=True, message="已重置")
 
+    def _cleanup_links_for_hash(self, download_hash: str) -> Tuple[int, int]:
+        """删除种子对应的媒体库软/硬链接（TransferHistory.dest_fileitem）。
+
+        参照 transferfaildelete 插件：
+        - 依据 download_hash 查所有 TransferHistory 记录
+        - 逐条从 dest_fileitem 反序列化为 schemas.FileItem，调用 StorageChain().delete_media_file 清理
+        - 成功后清理 DownloadHistory 中对应路径记录，发出 DownloadFileDeleted 事件
+        - 无论 delete_media_file 是否成功，都尝试删除 TransferHistory 行，避免残留脏记录
+
+        返回 (成功数, 失败数)。仅处理本地存储链接，其他存储遇错不阻断主删除流程。
+        """
+        if not download_hash:
+            return 0, 0
+        try:
+            transfer_oper = getattr(self, "_transferhistory_oper", None)
+            if transfer_oper is None:
+                transfer_oper = TransferHistoryOper()
+                self._transferhistory_oper = transfer_oper
+            storage_chain = getattr(self, "_storage_chain", None)
+            if storage_chain is None:
+                storage_chain = StorageChain()
+                self._storage_chain = storage_chain
+        except Exception as err:  # noqa: BLE001
+            logger.error(f"[CrossSeedView] 初始化清理组件失败 hash={download_hash}: {err}")
+            return 0, 0
+
+        try:
+            histories = transfer_oper.list_by_hash(download_hash) or []
+        except Exception as err:  # noqa: BLE001
+            logger.error(f"[CrossSeedView] 查询 TransferHistory 失败 hash={download_hash}: {err}")
+            return 0, 0
+
+        success = 0
+        fail = 0
+        for history in histories:
+            dest_fileitem = getattr(history, "dest_fileitem", None)
+            if not dest_fileitem:
+                # 无目标文件项：只清理 TransferHistory 记录
+                try:
+                    transfer_oper.delete(history.id)
+                except Exception as err:  # noqa: BLE001
+                    logger.debug(f"[CrossSeedView] 删除空目标 TransferHistory 失败 id={history.id}: {err}")
+                continue
+
+            try:
+                fileitem = schemas.FileItem(**dest_fileitem)
+            except Exception as err:  # noqa: BLE001
+                logger.warning(
+                    f"[CrossSeedView] 解析 dest_fileitem 失败 id={history.id} hash={download_hash}: {err}"
+                )
+                fail += 1
+                continue
+
+            file_path = getattr(fileitem, "path", None) or ""
+            try:
+                ok = storage_chain.delete_media_file(fileitem)
+            except Exception as err:  # noqa: BLE001
+                logger.error(
+                    f"[CrossSeedView] 删除媒体链接异常 path={file_path} hash={download_hash}: {err}"
+                )
+                ok = False
+
+            if ok:
+                success += 1
+                logger.info(f"[CrossSeedView] 已删除媒体链接：{file_path}")
+                # 清理下载记录
+                if file_path:
+                    try:
+                        DownloadHistoryOper().delete_file_by_fullpath(file_path)
+                    except Exception as err:  # noqa: BLE001
+                        logger.debug(f"[CrossSeedView] 清理下载记录失败 path={file_path}: {err}")
+                    try:
+                        eventmanager.send_event(
+                            EventType.DownloadFileDeleted,
+                            {"src": file_path, "hash": download_hash},
+                        )
+                    except Exception as err:  # noqa: BLE001
+                        logger.debug(f"[CrossSeedView] 发送 DownloadFileDeleted 事件失败：{err}")
+            else:
+                fail += 1
+                logger.warning(f"[CrossSeedView] 删除媒体链接失败：{file_path}")
+
+            # 删除 TransferHistory 记录（无论媒体文件是否删除成功，都清理脏数据）
+            try:
+                transfer_oper.delete(history.id)
+            except Exception as err:  # noqa: BLE001
+                logger.debug(f"[CrossSeedView] 删除 TransferHistory 失败 id={history.id}: {err}")
+
+        return success, fail
+
     def delete_torrent(self, params: DeleteTorrentParams) -> Response:
         """删除指定下载器中的单个种子。
 
@@ -345,12 +441,25 @@ class CrossSeedView(_PluginBase):
             f"[CrossSeedView] 已删除种子 hash={params.hash} downloader={params.downloader} "
             f"delete_files={params.delete_files}"
         )
+        # 连带清理媒体库软/硬链接（仅在“删种+文件”时）
+        link_msg = ""
+        if params.delete_files:
+            try:
+                s, f = self._cleanup_links_for_hash(params.hash)
+                if s or f:
+                    logger.info(
+                        f"[CrossSeedView] 媒体链接清理完成 hash={params.hash} 成功={s} 失败={f}"
+                    )
+                    link_msg = f"，媒体链接清理 成功{s}/失败{f}" if f else f"，媒体链接已清理 {s} 个"
+            except Exception as err:  # noqa: BLE001
+                logger.error(f"[CrossSeedView] 清理媒体链接异常 hash={params.hash}: {err}")
+                link_msg = f"，媒体链接清理异常：{err}"
         # 后台重新扫描，刷新分组
         try:
             self._refresh_cache(source="delete")
         except Exception as err:  # noqa: BLE001
             logger.debug(f"[CrossSeedView] 删除后刷新缓存失败（忽略）：{err}")
-        return Response(success=True, message="已删除")
+        return Response(success=True, message=f"已删除{link_msg}")
 
     # ---------- 多选相关 API ----------
 
@@ -437,6 +546,7 @@ class CrossSeedView(_PluginBase):
 
         total = sum(len(v) for v in by_dl.values())
         succeeded = 0
+        succeeded_hashs: List[str] = []
         failed_dls: List[str] = []
         for dl, hashs in by_dl.items():
             try:
@@ -451,8 +561,25 @@ class CrossSeedView(_PluginBase):
                 continue
             if ok:
                 succeeded += len(hashs)
+                succeeded_hashs.extend(hashs)
             else:
                 failed_dls.append(f"{dl}({len(hashs)})")
+
+        # 连带清理媒体库软/硬链接（仅在“删种+文件”时，且仅对下载器删除成功的种子）
+        link_success = 0
+        link_fail = 0
+        if params.delete_files and succeeded_hashs:
+            for h in succeeded_hashs:
+                try:
+                    s, f = self._cleanup_links_for_hash(h)
+                    link_success += s
+                    link_fail += f
+                except Exception as err:  # noqa: BLE001
+                    logger.error(f"[CrossSeedView] 批量清理媒体链接异常 hash={h}: {err}")
+                    link_fail += 1
+            logger.info(
+                f"[CrossSeedView] 批量媒体链接清理完成 成功={link_success} 失败={link_fail}"
+            )
 
         logger.info(
             f"[CrossSeedView] 批量删除完成 总数={total} 成功={succeeded} "
@@ -466,12 +593,20 @@ class CrossSeedView(_PluginBase):
         except Exception as err:  # noqa: BLE001
             logger.debug(f"[CrossSeedView] 批量删除后刷新缓存失败（忽略）：{err}")
 
+        link_msg = ""
+        if params.delete_files and (link_success or link_fail):
+            link_msg = (
+                f"，媒体链接清理 成功{link_success}/失败{link_fail}"
+                if link_fail
+                else f"，媒体链接已清理 {link_success} 个"
+            )
+
         if failed_dls:
             return Response(
                 success=succeeded > 0,
-                message=f"批量删除 {succeeded}/{total} 成功，失败：{'; '.join(failed_dls)}",
+                message=f"批量删除 {succeeded}/{total} 成功，失败：{'; '.join(failed_dls)}{link_msg}",
             )
-        return Response(success=True, message=f"已批量删除 {succeeded} 项")
+        return Response(success=True, message=f"已批量删除 {succeeded} 项{link_msg}")
 
 
     def get_service(self) -> List[Dict[str, Any]]:
