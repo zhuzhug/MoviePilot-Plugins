@@ -70,7 +70,7 @@ class CrossSeedView(_PluginBase):
     plugin_name = "辅种查看"
     plugin_desc = "扫描所有下载器种子，按“种子名+大小”识别辅种关系，用可折叠卡片展示辅种数量、保存路径与明细，支持交互筛选与可选删除。"
     plugin_icon = "seed.png"
-    plugin_version = "0.5.9"
+    plugin_version = "0.5.10"
     plugin_label = "下载器"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "crossseedview_"
@@ -1242,6 +1242,9 @@ class CrossSeedView(_PluginBase):
         toggle_select_api = f"plugin/CrossSeedView/toggle_select?apikey={settings.API_TOKEN}"
         toggle_select_group_api = f"plugin/CrossSeedView/toggle_select_group?apikey={settings.API_TOKEN}"
         batch_delete_api = f"plugin/CrossSeedView/batch_delete?apikey={settings.API_TOKEN}"
+        select_all_api = f"plugin/CrossSeedView/select_all?apikey={settings.API_TOKEN}"
+        select_invert_api = f"plugin/CrossSeedView/select_invert?apikey={settings.API_TOKEN}"
+        select_clear_api = f"plugin/CrossSeedView/select_clear?apikey={settings.API_TOKEN}"
         MAX_DELETE_CARDS = 50
 
         def _torrent_row(t: dict, show_delete: bool) -> dict:
@@ -1483,6 +1486,68 @@ class CrossSeedView(_PluginBase):
                     "text": f"已选 {selected_count} 项 / 当前可见 {len(visible)} 条",
                 },
             ]
+            visible_count = len(visible)
+            # 全选可见 / 反选可见 / 清空选择
+            toolbar_children.append(
+                {
+                    "component": "VBtn",
+                    "props": {
+                        "size": "small",
+                        "color": "primary",
+                        "variant": "tonal",
+                        "prepend-icon": "mdi-checkbox-multiple-marked",
+                        "class": "mr-1",
+                        "disabled": visible_count == 0,
+                    },
+                    "text": "全选可见",
+                    "events": {
+                        "click": {
+                            "api": select_all_api,
+                            "method": "get",
+                        }
+                    },
+                }
+            )
+            toolbar_children.append(
+                {
+                    "component": "VBtn",
+                    "props": {
+                        "size": "small",
+                        "color": "primary",
+                        "variant": "tonal",
+                        "prepend-icon": "mdi-select-inverse",
+                        "class": "mr-1",
+                        "disabled": visible_count == 0,
+                    },
+                    "text": "反选可见",
+                    "events": {
+                        "click": {
+                            "api": select_invert_api,
+                            "method": "get",
+                        }
+                    },
+                }
+            )
+            toolbar_children.append(
+                {
+                    "component": "VBtn",
+                    "props": {
+                        "size": "small",
+                        "color": "default",
+                        "variant": "text",
+                        "prepend-icon": "mdi-close-circle-outline",
+                        "class": "mr-3",
+                        "disabled": selected_count == 0,
+                    },
+                    "text": "清空选择",
+                    "events": {
+                        "click": {
+                            "api": select_clear_api,
+                            "method": "get",
+                        }
+                    },
+                }
+            )
             toolbar_children.append(
                 {
                     "component": "VBtn",
