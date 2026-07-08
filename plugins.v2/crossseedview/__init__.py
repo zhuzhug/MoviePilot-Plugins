@@ -70,7 +70,7 @@ class CrossSeedView(_PluginBase):
     plugin_name = "辅种查看"
     plugin_desc = "扫描所有下载器种子，按“种子名+大小”识别辅种关系，用可折叠卡片展示辅种数量、保存路径与明细，支持交互筛选与可选删除。"
     plugin_icon = "seed.png"
-    plugin_version = "0.5.12"
+    plugin_version = "0.5.13"
     plugin_label = "下载器"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "crossseedview_"
@@ -1335,19 +1335,19 @@ class CrossSeedView(_PluginBase):
                 })
             dl_col_content: List[dict] = []
             if show_delete and thash and dl_name:
+                row_selected = thash in self._selected
                 dl_col_content.append({
                     "component": "VBtn",
                     "props": {
                         "icon": (
                             "mdi-checkbox-marked"
-                            if thash in self._selected
+                            if row_selected
                             else "mdi-checkbox-blank-outline"
                         ),
                         "size": "small",
-                        "variant": "text",
-                        "color": (
-                            "success" if thash in self._selected else "medium-emphasis"
-                        ),
+                        # v0.5.13: 未选=outlined 有可见边框，已选=flat 实心绿色
+                        "variant": "flat" if row_selected else "outlined",
+                        "color": "success" if row_selected else "grey-darken-1",
                         "class": "mr-1",
                     },
                     "events": {
@@ -1658,15 +1658,19 @@ class CrossSeedView(_PluginBase):
                     if t.get("hash") and t.get("downloader")
                 ]
                 sel_count = sum(1 for p in group_pairs if p["hash"] in self._selected)
+                # v0.5.13: 提升可见度——outlined/flat 变体，避免 text 变体在浅色背景下几乎透明
                 if sel_count == 0:
                     group_icon = "mdi-checkbox-blank-outline"
-                    group_icon_color = "medium-emphasis"
+                    group_icon_color = "grey-darken-1"
+                    group_icon_variant = "outlined"
                 elif sel_count == len(group_pairs):
                     group_icon = "mdi-checkbox-marked"
                     group_icon_color = "success"
+                    group_icon_variant = "flat"
                 else:
                     group_icon = "mdi-checkbox-intermediate"
-                    group_icon_color = "primary"
+                    group_icon_color = "warning"
+                    group_icon_variant = "tonal"
                 group_checkbox_btn: List[dict] = []
                 if show_delete and group_pairs:
                     if len(group_pairs) == 1:
@@ -1677,7 +1681,7 @@ class CrossSeedView(_PluginBase):
                             "props": {
                                 "icon": group_icon,
                                 "size": "default",
-                                "variant": "text",
+                                "variant": group_icon_variant,
                                 "color": group_icon_color,
                                 "density": "comfortable",
                             },
@@ -1696,7 +1700,7 @@ class CrossSeedView(_PluginBase):
                             "props": {
                                 "icon": group_icon,
                                 "size": "default",
-                                "variant": "text",
+                                "variant": group_icon_variant,
                                 "color": group_icon_color,
                                 "density": "comfortable",
                             },
