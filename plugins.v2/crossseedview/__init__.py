@@ -70,7 +70,7 @@ class CrossSeedView(_PluginBase):
     plugin_name = "辅种查看"
     plugin_desc = "扫描所有下载器种子，按“种子名+大小”识别辅种关系，用可折叠卡片展示辅种数量、保存路径与明细，支持交互筛选与可选删除。"
     plugin_icon = "seed.png"
-    plugin_version = "0.5.10"
+    plugin_version = "0.5.11"
     plugin_label = "下载器"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "crossseedview_"
@@ -1679,7 +1679,8 @@ class CrossSeedView(_PluginBase):
                                 "size": "small",
                                 "variant": "text",
                                 "color": group_icon_color,
-                                "class": "ml-2",
+                                "class": "mr-2",
+                                "style": "flex: 0 0 auto;",
                             },
                             "events": {
                                 "click": {
@@ -1698,7 +1699,8 @@ class CrossSeedView(_PluginBase):
                                 "size": "small",
                                 "variant": "text",
                                 "color": group_icon_color,
-                                "class": "ml-2",
+                                "class": "mr-2",
+                                "style": "flex: 0 0 auto;",
                             },
                             "events": {
                                 "click": {
@@ -1709,10 +1711,11 @@ class CrossSeedView(_PluginBase):
                             },
                         })
                 # 卡片头：名称 + 概要 chips（名称可选中复制，不触发展开）
+                # v0.5.11: 复选框固定在卡片头首位，避免 flex-wrap 时被 chips 挤到下一行/hidden
                 header_row = {
                     "component": "div",
                     "props": {"class": "d-flex flex-wrap align-center px-4 pt-3 pb-2"},
-                    "content": [
+                    "content": group_checkbox_btn + [
                         {
                             "component": "div",
                             "props": {
@@ -1768,7 +1771,7 @@ class CrossSeedView(_PluginBase):
                             "props": {"size": "x-small", "color": "success", "variant": "tonal", "class": "ml-2"},
                             "text": "↑ " + self._fmt_size(it.get("total_uploaded", 0)),
                         }] if (it.get("total_uploaded") or 0) > 0 else []
-                    ) + group_checkbox_btn,
+                    ),
                 }
                 torrent_rows = [_torrent_row(t, show_delete) for t in torrents]
                 expand_content = torrent_rows or [
