@@ -70,7 +70,7 @@ class CrossSeedView(_PluginBase):
     plugin_name = "辅种查看"
     plugin_desc = "扫描所有下载器种子，按“种子名+大小”识别辅种关系，用可折叠卡片展示辅种数量、保存路径与明细，支持交互筛选与可选删除。"
     plugin_icon = "seed.png"
-    plugin_version = "0.5.11"
+    plugin_version = "0.5.12"
     plugin_label = "下载器"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "crossseedview_"
@@ -1676,11 +1676,10 @@ class CrossSeedView(_PluginBase):
                             "component": "VBtn",
                             "props": {
                                 "icon": group_icon,
-                                "size": "small",
+                                "size": "default",
                                 "variant": "text",
                                 "color": group_icon_color,
-                                "class": "mr-2",
-                                "style": "flex: 0 0 auto;",
+                                "density": "comfortable",
                             },
                             "events": {
                                 "click": {
@@ -1696,11 +1695,10 @@ class CrossSeedView(_PluginBase):
                             "component": "VBtn",
                             "props": {
                                 "icon": group_icon,
-                                "size": "small",
+                                "size": "default",
                                 "variant": "text",
                                 "color": group_icon_color,
-                                "class": "mr-2",
-                                "style": "flex: 0 0 auto;",
+                                "density": "comfortable",
                             },
                             "events": {
                                 "click": {
@@ -1711,11 +1709,12 @@ class CrossSeedView(_PluginBase):
                             },
                         })
                 # 卡片头：名称 + 概要 chips（名称可选中复制，不触发展开）
-                # v0.5.11: 复选框固定在卡片头首位，避免 flex-wrap 时被 chips 挤到下一行/hidden
+                # v0.5.12: header_row 内只放名称+chips；复选框剥离到 VCard 左侧独立列，
+                # 折叠时也能稳定可见，绝不会被 flex-wrap 挤到隐藏位置。
                 header_row = {
                     "component": "div",
                     "props": {"class": "d-flex flex-wrap align-center px-4 pt-3 pb-2"},
-                    "content": group_checkbox_btn + [
+                    "content": [
                         {
                             "component": "div",
                             "props": {
@@ -1820,13 +1819,44 @@ class CrossSeedView(_PluginBase):
                             "background-color: rgba(33,150,243,0.05); "
                             "border-color: #64b5f6;"
                         )
-                group_cards.append(
-                    {
-                        "component": "VCard",
-                        "props": group_card_props,
-                        "content": [header_row, expansion_panel],
+                # v0.5.12: VCard 内部横向双列
+                #   左列：复选框（固定 44px 宽，flex 不压缩，折叠时也稳定可见）
+                #   右列：header_row + expansion_panel（原内容）
+                if group_checkbox_btn:
+                    card_body = {
+                        "component": "div",
+                        "props": {"class": "d-flex align-start", "style": "width: 100%;"},
+                        "content": [
+                            {
+                                "component": "div",
+                                "props": {
+                                    "class": "d-flex align-center justify-center pl-2 pt-3",
+                                    "style": "flex: 0 0 44px; min-width: 44px;",
+                                },
+                                "content": group_checkbox_btn,
+                            },
+                            {
+                                "component": "div",
+                                "props": {"class": "flex-grow-1", "style": "min-width: 0;"},
+                                "content": [header_row, expansion_panel],
+                            },
+                        ],
                     }
-                )
+                    group_cards.append(
+                        {
+                            "component": "VCard",
+                            "props": group_card_props,
+                            "content": [card_body],
+                        }
+                    )
+                else:
+                    group_cards.append(
+                        {
+                            "component": "VCard",
+                            "props": group_card_props,
+                            "content": [header_row, expansion_panel],
+                        }
+                    )
             card_list_content.extend(group_cards)
             if self._allow_delete and len(items) > MAX_DELETE_CARDS:
                 card_list_content.append(
