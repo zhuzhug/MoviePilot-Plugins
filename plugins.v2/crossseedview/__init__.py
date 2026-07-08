@@ -70,7 +70,7 @@ class CrossSeedView(_PluginBase):
     plugin_name = "辅种查看"
     plugin_desc = "扫描所有下载器种子，按“种子名+大小”识别辅种关系，用可折叠卡片展示辅种数量、保存路径与明细，支持交互筛选与可选删除。"
     plugin_icon = "seed.png"
-    plugin_version = "0.5.8"
+    plugin_version = "0.5.9"
     plugin_label = "下载器"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "crossseedview_"
@@ -446,14 +446,18 @@ class CrossSeedView(_PluginBase):
         if params.delete_files:
             try:
                 s, f = self._cleanup_links_for_hash(params.hash)
-                if s or f:
-                    logger.info(
-                        f"[CrossSeedView] 媒体链接清理完成 hash={params.hash} 成功={s} 失败={f}"
-                    )
-                    link_msg = f"，媒体链接清理 成功{s}/失败{f}" if f else f"，媒体链接已清理 {s} 个"
+                logger.info(
+                    f"[CrossSeedView] 媒体链接清理完成 hash={params.hash} 成功={s} 失败={f}"
+                )
+                if f:
+                    link_msg = f"，媒体库链接清理 成功{s}/失败{f}"
+                elif s:
+                    link_msg = f"，已同步清理媒体库链接 {s} 个"
+                else:
+                    link_msg = "，无关联媒体库链接"
             except Exception as err:  # noqa: BLE001
                 logger.error(f"[CrossSeedView] 清理媒体链接异常 hash={params.hash}: {err}")
-                link_msg = f"，媒体链接清理异常：{err}"
+                link_msg = f"，媒体库链接清理异常：{err}"
         # 后台重新扫描，刷新分组
         try:
             self._refresh_cache(source="delete")
@@ -595,11 +599,12 @@ class CrossSeedView(_PluginBase):
 
         link_msg = ""
         if params.delete_files and (link_success or link_fail):
-            link_msg = (
-                f"，媒体链接清理 成功{link_success}/失败{link_fail}"
-                if link_fail
-                else f"，媒体链接已清理 {link_success} 个"
-            )
+            if link_fail:
+                link_msg = f"，媒体库链接清理 成功{link_success}/失败{link_fail}"
+            elif link_success:
+                link_msg = f"，已同步清理媒体库链接 {link_success} 个"
+        elif params.delete_files and succeeded_hashs:
+            link_msg = "，无关联媒体库链接"
 
         if failed_dls:
             return Response(
@@ -685,7 +690,7 @@ class CrossSeedView(_PluginBase):
                                         "component": "VSwitch",
                                         "props": {
                                             "model": "allow_delete",
-                                            "label": "允许在详情页删除种子（危险）",
+                                            "label": "允许在详情页删除种子（含媒体库链接，危险）",
                                             "color": "error",
                                         },
                                     }
@@ -1422,7 +1427,7 @@ class CrossSeedView(_PluginBase):
                                     "variant": "flat",
                                     "size": "x-small",
                                 },
-                                "text": "删种+文件",
+                                "text": "删种+文件+清库",
                                 "content": [{
                                     "component": "VMenu",
                                     "props": {"activator": "parent", "close-on-content-click": True},
@@ -1431,7 +1436,7 @@ class CrossSeedView(_PluginBase):
                                         "props": {"density": "compact"},
                                         "content": [{
                                             "component": "VListItem",
-                                            "props": {"prepend-icon": "mdi-alert", "title": "确认删种+文件（不可撤销）", "class": "text-error"},
+                                            "props": {"prepend-icon": "mdi-alert", "title": "确认删种+源文件+媒体库链接（不可撤销）", "class": "text-error"},
                                             "events": {
                                                 "click": {
                                                     "api": delete_api,
@@ -1524,7 +1529,7 @@ class CrossSeedView(_PluginBase):
                         "prepend-icon": "mdi-delete-alert",
                         "disabled": selected_count == 0,
                     },
-                    "text": "批量删种+文件",
+                    "text": "批量删种+文件+清库",
                     "content": [{
                         "component": "VMenu",
                         "props": {"activator": "parent", "close-on-content-click": True},
@@ -1535,7 +1540,7 @@ class CrossSeedView(_PluginBase):
                                 "component": "VListItem",
                                 "props": {
                                     "prepend-icon": "mdi-alert",
-                                    "title": f"确认批量删种+文件（{selected_count} 项，不可撤销）",
+                                    "title": f"确认批量删种+源文件+媒体库链接（{selected_count} 项，不可撤销）",
                                     "class": "text-error",
                                 },
                                 "events": {
@@ -1861,7 +1866,9 @@ class CrossSeedView(_PluginBase):
                                             "props": {"class": "mb-0"},
                                             "content": [
                                                 {"component": "strong", "text": "删除按钮"},
-                                                {"component": "span", "text": "：默认关闭。到插件设置里开启「允许在详情页删除种子（危险）」后，前 50 组会出现「仅删种」（保留文件）和「删种+文件」（连同文件一起删）两个按钮。"},
+                                                {"component": "span", "text": "：默认关闭。到插件设置里开启「允许在详情页删除种子（危险）」后，前 50 组会出现两个按钮——「仅删种」保留文件仅从下载器移除；"},
+                                                {"component": "strong", "props": {"class": "text-error"}, "text": "「删种+文件+清库」"},
+                                                {"component": "span", "text": "在下载器删除种子和源文件的同时，会顺带清理媒体库里指向这些源文件的软/硬链接（读 TransferHistory 反向定位），操作不可撤销。"},
                                             ],
                                         },
                                     ],
