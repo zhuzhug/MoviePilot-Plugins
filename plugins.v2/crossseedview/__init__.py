@@ -64,7 +64,7 @@ class CrossSeedView(_PluginBase):
     plugin_name = "辅种查看"
     plugin_desc = "扫描所有下载器种子，按“种子名+大小”识别辅种关系，用可折叠卡片展示辅种数量、保存路径与明细，支持交互筛选与可选删除。"
     plugin_icon = "seed.png"
-    plugin_version = "0.5.4"
+    plugin_version = "0.5.6"
     plugin_label = "下载器"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "crossseedview_"
@@ -1096,12 +1096,12 @@ class CrossSeedView(_PluginBase):
             ],
         }
 
-        # 构建卡片列表
-        # 采用相对路径，前端 axios 自动携带鉴权，成功后自动触发 action 事件重新拉取 get_page
-        delete_api = "plugin/CrossSeedView/delete_torrent"
-        toggle_select_api = "plugin/CrossSeedView/toggle_select"
-        toggle_select_group_api = "plugin/CrossSeedView/toggle_select_group"
-        batch_delete_api = "plugin/CrossSeedView/batch_delete"
+                # 构建卡片列表
+        # PageRender events.click 不会自动带 Bearer 头，必须在 URL 上拼 ?apikey= 走 apikey 分支
+        delete_api = f"plugin/CrossSeedView/delete_torrent?apikey={settings.API_TOKEN}"
+        toggle_select_api = f"plugin/CrossSeedView/toggle_select?apikey={settings.API_TOKEN}"
+        toggle_select_group_api = f"plugin/CrossSeedView/toggle_select_group?apikey={settings.API_TOKEN}"
+        batch_delete_api = f"plugin/CrossSeedView/batch_delete?apikey={settings.API_TOKEN}"
         MAX_DELETE_CARDS = 50
 
         def _torrent_row(t: dict, show_delete: bool) -> dict:
@@ -1114,8 +1114,12 @@ class CrossSeedView(_PluginBase):
             display_path = save_path or "-"
             # 命中当前 path_keyword 时高亮该行
             hit_path = bool(path_kw and save_path and path_kw in save_path.lower())
+            is_selected = bool(show_delete and thash and thash in self._selected)
             row_props = {"dense": True, "class": "align-center py-1"}
-            if hit_path:
+            # 选中态优先蓝色高亮，其次是路径命中的绿色
+            if is_selected:
+                row_props["style"] = "background-color: rgba(33,150,243,0.14); border-left: 3px solid #2196f3;"
+            elif hit_path:
                 row_props["style"] = "background-color: rgba(76,175,80,0.10); border-left: 3px solid #4caf50;"
             # 附加：所属分组信息（仅按下载器视图时可用）
             group_hint = ""
@@ -1196,10 +1200,10 @@ class CrossSeedView(_PluginBase):
                             if thash in self._selected
                             else "mdi-checkbox-blank-outline"
                         ),
-                        "size": "x-small",
+                        "size": "small",
                         "variant": "text",
                         "color": (
-                            "primary" if thash in self._selected else "medium-emphasis"
+                            "success" if thash in self._selected else "medium-emphasis"
                         ),
                         "class": "mr-1",
                     },
@@ -1454,7 +1458,7 @@ class CrossSeedView(_PluginBase):
                     group_icon_color = "medium-emphasis"
                 elif sel_count == len(group_pairs):
                     group_icon = "mdi-checkbox-marked"
-                    group_icon_color = "primary"
+                    group_icon_color = "success"
                 else:
                     group_icon = "mdi-checkbox-intermediate"
                     group_icon_color = "primary"
@@ -1594,10 +1598,24 @@ class CrossSeedView(_PluginBase):
                         }
                     ],
                 }
+                group_card_props = {"variant": "outlined", "class": "mb-2"}
+                if show_delete and group_pairs:
+                    if sel_count == len(group_pairs) and sel_count > 0:
+                        # 全选：深蓝色边框 + 中等蓝底
+                        group_card_props["style"] = (
+                            "background-color: rgba(33,150,243,0.10); "
+                            "border-color: #1976d2; border-width: 2px;"
+                        )
+                    elif sel_count > 0:
+                        # 部分选中：浅蓝底 + 蓝色边框
+                        group_card_props["style"] = (
+                            "background-color: rgba(33,150,243,0.05); "
+                            "border-color: #64b5f6;"
+                        )
                 group_cards.append(
                     {
                         "component": "VCard",
-                        "props": {"variant": "outlined", "class": "mb-2"},
+                        "props": group_card_props,
                         "content": [header_row, expansion_panel],
                     }
                 )
