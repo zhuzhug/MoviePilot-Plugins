@@ -70,7 +70,7 @@ class CrossSeedView(_PluginBase):
     plugin_name = "辅种查看"
     plugin_desc = "扫描所有下载器种子，按“种子名+大小”识别辅种关系，用可折叠卡片展示辅种数量、保存路径与明细，支持交互筛选与可选删除。"
     plugin_icon = "seed.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     plugin_label = "下载器"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "crossseedview_"
@@ -324,6 +324,98 @@ class CrossSeedView(_PluginBase):
             return Response(success=False, message=f"重置失败：{err}")
         return Response(success=True, message="已重置")
 
+    def _cleanup_scrape_leftover_dirs(self, fileitem, storage_chain) -> int:
+        """兜底清理刮削残留目录。
+
+        场景：`StorageChain.delete_media_file` 删完源文件后，会尝试逐级向上清理
+        空的父目录，但存在两处保守分支：
+        1) 当父目录匹配到 DirectoryHelper 的资源目录/媒体库根（library_path）时，
+           条件 `associated_dir.is_relative_to(dir_item.path)` 为真直接 break；
+        2) 目录内残留 .nfo / .jpg / .srt 等非视频文件时，`list_files(recursion=False)`
+           非空也会 break。
+
+        结果就是电影的刮削文件夹（比如 `外语电影/XX电影/`）保留了 poster/nfo 等
+        残留，用户视觉上"没删干净"。
+
+        这里做兜底：从被删文件的父目录起向上探测最多 2 层，仅当整棵子树里没有
+        任何视频扩展（`settings.RMT_MEDIAEXT`）时，直接 `storage_chain.delete_file`
+        整个目录。本地存储对 dir 走 `shutil.rmtree`，能连带 .nfo/.jpg 清干净。
+
+        约束：
+        - 只处理路径深度 > 2 的目录，避免误删根或一级目录；
+        - 只用纯视频扩展，避免字幕/音频文件反过来保住空壳目录；
+        - 只处理与 fileitem 同一 storage 的层级；
+        - 全流程 try/except，失败不阻断主删除。
+
+        返回实际删除的目录数量。
+        """
+        from pathlib import Path  # 局部导入避免顶部污染
+
+        removed = 0
+        try:
+            parent = storage_chain.get_parent_item(fileitem)
+        except Exception as err:  # noqa: BLE001
+            logger.debug(f"[CrossSeedView] 取父目录失败：{err}")
+            return 0
+
+        # 最多向上探测 2 层：一般刮削目录结构为 <媒体库根>/<分类>/<影片名>/<文件>
+        for _ in range(2):
+            if not parent:
+                break
+            parent_path = getattr(parent, "path", None) or ""
+            if not parent_path:
+                break
+            # 安全边界：路径过浅一律不动
+            try:
+                if len(Path(parent_path).parts) <= 2:
+                    logger.debug(f"[CrossSeedView] 父目录过浅，停止兜底：{parent_path}")
+                    break
+            except Exception:  # noqa: BLE001
+                break
+
+            # 是否还有真实视频文件
+            try:
+                has_video = storage_chain.any_files(
+                    parent, extensions=settings.RMT_MEDIAEXT
+                )
+            except Exception as err:  # noqa: BLE001
+                logger.debug(
+                    f"[CrossSeedView] any_files 检查失败 path={parent_path}: {err}"
+                )
+                break
+
+            if has_video is not False:
+                # True 或 None（不支持的存储）都不动
+                logger.debug(
+                    f"[CrossSeedView] 目录仍存在视频文件或无法确认，停止兜底：{parent_path}"
+                )
+                break
+
+            # 无视频文件，整目录删掉（残留 .nfo/.jpg 一并清）
+            try:
+                ok = storage_chain.delete_file(parent)
+            except Exception as err:  # noqa: BLE001
+                logger.warning(
+                    f"[CrossSeedView] 兜底删除目录异常 path={parent_path}: {err}"
+                )
+                break
+            if not ok:
+                logger.warning(
+                    f"[CrossSeedView] 兜底删除目录返回失败 path={parent_path}"
+                )
+                break
+            removed += 1
+            logger.info(f"[CrossSeedView] 已清理刮削残留目录：{parent_path}")
+
+            # 继续向上一层
+            try:
+                parent = storage_chain.get_parent_item(parent)
+            except Exception as err:  # noqa: BLE001
+                logger.debug(f"[CrossSeedView] 继续上探父目录失败：{err}")
+                break
+
+        return removed
+
     def _cleanup_links_for_hash(self, download_hash: str) -> Tuple[int, int]:
         """删除种子对应的媒体库软/硬链接（TransferHistory.dest_fileitem）。
 
@@ -402,6 +494,18 @@ class CrossSeedView(_PluginBase):
                         )
                     except Exception as err:  # noqa: BLE001
                         logger.debug(f"[CrossSeedView] 发送 DownloadFileDeleted 事件失败：{err}")
+
+                # 兜底清理刮削残留目录：StorageChain.delete_media_file 会因为
+                # associated_dir 匹配失败或目录残留 .nfo/.jpg/字幕等文件而 break，
+                # 导致刮削目录仍在。这里只用 RMT_MEDIAEXT（纯视频扩展）判断，
+                # 递归向上最多 2 层，凡是不含视频文件的目录直接 delete_file，
+                # 本地存储的 delete 走 shutil.rmtree，能一并清掉 .nfo/.jpg 等残留。
+                try:
+                    self._cleanup_scrape_leftover_dirs(fileitem, storage_chain)
+                except Exception as err:  # noqa: BLE001
+                    logger.debug(
+                        f"[CrossSeedView] 清理刮削残留目录异常 path={file_path}: {err}"
+                    )
             else:
                 fail += 1
                 logger.warning(f"[CrossSeedView] 删除媒体链接失败：{file_path}")
