@@ -17,7 +17,7 @@ from app.db.transferhistory_oper import TransferHistoryOper
 from app.helper.downloader import DownloaderHelper
 from app.log import logger
 from app.plugins import _PluginBase
-from app.schemas import Response
+from app.schemas import NotificationType, Response
 from app.schemas.types import EventType
 
 
@@ -70,7 +70,7 @@ class CrossSeedView(_PluginBase):
     plugin_name = "辅种查看"
     plugin_desc = "扫描所有下载器种子，按“种子名+大小”识别辅种关系，用可折叠卡片展示辅种数量、保存路径与明细，支持交互筛选与可选删除。"
     plugin_icon = "seed.png"
-    plugin_version = "1.0.1"
+    plugin_version = "1.0.2"
     plugin_label = "下载器"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "crossseedview_"
@@ -91,6 +91,7 @@ class CrossSeedView(_PluginBase):
     _size_min_gb: float = 0.0
     _size_max_gb: float = 0.0  # 0 = 不限
     _allow_delete: bool = False  # 安全开关：详情页是否显示删除按钮
+    _notify: bool = False  # 删种时是否发送通知
     _sort_by: str = "count"  # 排序字段: count/size/name/seeding_time/uploaded
     _sort_order: str = "desc"  # 排序方向: desc/asc
     _view_mode: str = "group"  # 视图模式: group(按分组) / downloader(按下载器聚合)
@@ -138,6 +139,7 @@ class CrossSeedView(_PluginBase):
             except (TypeError, ValueError):
                 self._size_max_gb = 0.0
             self._allow_delete = bool(config.get("allow_delete", False))
+            self._notify = bool(config.get("notify", False))
             self._sort_by = str(config.get("sort_by") or "count").strip() or "count"
             self._sort_order = str(config.get("sort_order") or "desc").strip() or "desc"
             self._view_mode = str(config.get("view_mode") or "group").strip() or "group"
@@ -567,6 +569,17 @@ class CrossSeedView(_PluginBase):
             self._refresh_cache(source="delete")
         except Exception as err:  # noqa: BLE001
             logger.debug(f"[CrossSeedView] 删除后刷新缓存失败（忽略）：{err}")
+        # 发送通知
+        if self._notify:
+            try:
+                mode_txt = "删种+文件+清库" if params.delete_files else "仅删种"
+                self.post_message(
+                    mtype=NotificationType.Manual,
+                    title="【辅种查看-单条删除】",
+                    text=f"{mode_txt}\nhash: {params.hash[:8]}\n下载器: {params.downloader}{link_msg}",
+                )
+            except Exception as err:  # noqa: BLE001
+                logger.debug(f"[CrossSeedView] 发送删除通知失败（忽略）：{err}")
         return Response(success=True, message=f"已删除{link_msg}")
 
     # ---------- 多选相关 API ----------
@@ -710,6 +723,19 @@ class CrossSeedView(_PluginBase):
         elif params.delete_files and succeeded_hashs:
             link_msg = "，无关联媒体库链接"
 
+        # 发送通知
+        if self._notify:
+            try:
+                mode_txt = "删种+文件+清库" if params.delete_files else "仅删种"
+                fail_txt = ("\n失败：" + "; ".join(failed_dls)) if failed_dls else ""
+                self.post_message(
+                    mtype=NotificationType.Manual,
+                    title="【辅种查看-批量删除】",
+                    text=f"{mode_txt}\n成功 {succeeded}/{total} 项{link_msg}{fail_txt}",
+                )
+            except Exception as err:  # noqa: BLE001
+                logger.debug(f"[CrossSeedView] 发送批量删除通知失败（忽略）：{err}")
+
         if failed_dls:
             return Response(
                 success=succeeded > 0,
@@ -796,6 +822,19 @@ class CrossSeedView(_PluginBase):
                                             "model": "allow_delete",
                                             "label": "允许在详情页删除种子（含媒体库链接，危险）",
                                             "color": "error",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 3},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "notify",
+                                            "label": "删种时发送通知",
                                         },
                                     }
                                 ],
@@ -951,6 +990,7 @@ class CrossSeedView(_PluginBase):
             "refresh_on_init": True,
             "include_all_tags": True,
             "allow_delete": False,
+            "notify": False,
             "cron": "0 4 * * *",
             "min_count": 2,
             "max_count": 0,
