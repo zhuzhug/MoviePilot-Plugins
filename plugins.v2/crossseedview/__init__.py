@@ -71,7 +71,7 @@ class CrossSeedView(_PluginBase):
     plugin_name = "辅种查看"
     plugin_desc = "扫描所有下载器种子，按“种子名+大小”识别辅种关系，用可折叠卡片展示辅种数量、保存路径与明细，支持交互筛选与可选删除。"
     plugin_icon = "seed.png"
-    plugin_version = "1.1.1"
+    plugin_version = "1.1.2"
     plugin_label = "下载器"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "crossseedview_"
@@ -448,6 +448,30 @@ class CrossSeedView(_PluginBase):
 
         return removed
 
+    def _find_related_hashes(self, download_hash: str) -> List[str]:
+        """从当前缓存中查找与该 hash 同组（相同 name+size）的所有辅种 hash。
+
+        辅种场景下 TransferHistory 只会关联"最先入库"那个 hash。用户删除的
+        是另一个辅种 hash 时，list_by_hash 会直接返空，看起来"无媒体库关联"，
+        但媒体库文件其实还在。此函数按缓存里的分组扩展 hash 列表，供
+        _cleanup_links_for_hash 兜底查询用。返回值包含自身 hash。
+        """
+        result: List[str] = [download_hash]
+        try:
+            with self._cache_lock:
+                groups = list((self._cache or {}).get("groups") or [])
+            for g in groups:
+                tors = g.get("torrents") or []
+                hashes = [t.get("hash") for t in tors if t.get("hash")]
+                if download_hash in hashes:
+                    for h in hashes:
+                        if h and h != download_hash and h not in result:
+                            result.append(h)
+                    break
+        except Exception as err:  # noqa: BLE001
+            logger.debug(f"[CrossSeedView] 查找同组辅种 hash 失败 {download_hash}: {err}")
+        return result
+
     def _cleanup_links_for_hash(self, download_hash: str) -> Tuple[int, int]:
         """删除种子对应的媒体库软/硬链接（TransferHistory.dest_fileitem）。
 
@@ -456,6 +480,10 @@ class CrossSeedView(_PluginBase):
         - 逐条从 dest_fileitem 反序列化为 schemas.FileItem，调用 StorageChain().delete_media_file 清理
         - 成功后清理 DownloadHistory 中对应路径记录，发出 DownloadFileDeleted 事件
         - 无论 delete_media_file 是否成功，都尝试删除 TransferHistory 行，避免残留脏记录
+
+        辅种回退：如果按 download_hash 查不到 TransferHistory，会自动从缓存里
+        找到同组（相同 name+size）的其他辅种 hash，再次尝试查询。避免用户看到
+        "无媒体库关联"但媒体库文件仍残留的现象。
 
         返回 (成功数, 失败数)。仅处理本地存储链接，其他存储遇错不阻断主删除流程。
         """
@@ -474,11 +502,28 @@ class CrossSeedView(_PluginBase):
             logger.error(f"[CrossSeedView] 初始化清理组件失败 hash={download_hash}: {err}")
             return 0, 0
 
-        try:
-            histories = transfer_oper.list_by_hash(download_hash) or []
-        except Exception as err:  # noqa: BLE001
-            logger.error(f"[CrossSeedView] 查询 TransferHistory 失败 hash={download_hash}: {err}")
+        # 汇总所有相关 TransferHistory：自身 hash + 同组辅种 hash（按 id 去重）
+        related_hashes = self._find_related_hashes(download_hash)
+        histories_map: Dict[int, Any] = {}
+        for h in related_hashes:
+            try:
+                for hist in (transfer_oper.list_by_hash(h) or []):
+                    histories_map[hist.id] = hist
+            except Exception as err:  # noqa: BLE001
+                logger.debug(f"[CrossSeedView] 查询 TransferHistory 失败 hash={h}: {err}")
+        histories = list(histories_map.values())
+
+        if not histories:
+            logger.info(
+                f"[CrossSeedView] 未找到关联 TransferHistory hash={download_hash} "
+                f"（已尝试同组辅种 {len(related_hashes)} 个 hash）"
+            )
             return 0, 0
+        if len(related_hashes) > 1:
+            logger.info(
+                f"[CrossSeedView] 辅种回退命中 TransferHistory {len(histories)} 条 "
+                f"（原 hash={download_hash}，扩展至同组 {len(related_hashes)} 个 hash）"
+            )
 
         success = 0
         fail = 0
