@@ -71,7 +71,7 @@ class CrossSeedView(_PluginBase):
     plugin_name = "辅种查看"
     plugin_desc = "扫描所有下载器种子，按“种子名+大小”识别辅种关系，用可折叠卡片展示辅种数量、保存路径与明细，支持交互筛选与可选删除。"
     plugin_icon = "seed.png"
-    plugin_version = "1.1.3"
+    plugin_version = "1.1.4"
     plugin_label = "下载器"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "crossseedview_"
@@ -478,6 +478,35 @@ class CrossSeedView(_PluginBase):
             logger.debug(f"[CrossSeedView] 查询 content_path 失败 hashes={hashes}: {err}")
         return result
 
+    def _lookup_torrent_names(self, hashes: List[str]) -> Dict[str, str]:
+        """从缓存 groups 中按 hash 取所属分组的种子名称。
+
+        v1.1.4：用于在通知/日志里显示"删除的是哪个种子"，与 _lookup_content_paths
+        同样必须在 remove_torrents 之前调用。
+        """
+        result: Dict[str, str] = {}
+        if not hashes:
+            return result
+        wanted = set(h for h in hashes if h)
+        if not wanted:
+            return result
+        try:
+            with self._cache_lock:
+                groups = list((self._cache or {}).get("groups") or [])
+            for g in groups:
+                if not wanted:
+                    break
+                gname = str(g.get("name") or "")
+                for t in (g.get("torrents") or []):
+                    th = t.get("hash")
+                    if th and th in wanted:
+                        if gname and th not in result:
+                            result[th] = gname
+                        wanted.discard(th)
+        except Exception as err:  # noqa: BLE001
+            logger.debug(f"[CrossSeedView] 查询种子名称失败 hashes={hashes}: {err}")
+        return result
+
     def _find_related_hashes(self, download_hash: str) -> List[str]:
         """从当前缓存中查找与该 hash 同组（相同 name+size）的所有辅种 hash。
 
@@ -506,7 +535,7 @@ class CrossSeedView(_PluginBase):
         self,
         download_hash: str,
         content_path: Optional[str] = None,
-    ) -> Tuple[int, int]:
+    ) -> Tuple[int, int, List[str], List[str]]:
         """联动 MoviePilot 原生"删除源文件和媒体库文件"流程清理辅种残留。
 
         对齐原生入口 `/api/v1/history/transfer?deletesrc=true&deletedest=true`
@@ -527,10 +556,11 @@ class CrossSeedView(_PluginBase):
         content_path 必须由调用方在 remove_torrents 之前从缓存 group 中取出，
         否则种子从下载器移除后此路径无法再获取。
 
-        返回 (成功数, 失败数)。仅处理本地存储链接，其他存储遇错不阻断主删除流程。
+        返回 (成功数, 失败数, 已删除的媒体库路径列表, 删除失败的媒体库路径列表)。
+        仅处理本地存储链接，其他存储遇错不阻断主删除流程。
         """
         if not download_hash:
-            return 0, 0
+            return 0, 0, [], []
         try:
             transfer_oper = getattr(self, "_transferhistory_oper", None)
             if transfer_oper is None:
@@ -542,7 +572,7 @@ class CrossSeedView(_PluginBase):
                 self._storage_chain = storage_chain
         except Exception as err:  # noqa: BLE001
             logger.error(f"[CrossSeedView] 初始化清理组件失败 hash={download_hash}: {err}")
-            return 0, 0
+            return 0, 0, [], []
 
         # 汇总所有相关 TransferHistory：主 hash + 同组辅种 hash + content_path 兜底
         related_hashes = self._find_related_hashes(download_hash)
@@ -578,7 +608,7 @@ class CrossSeedView(_PluginBase):
                 f"（已尝试同组辅种 {len(related_hashes)} 个 hash"
                 f"{'+ content_path 兜底' if content_path else ''}）"
             )
-            return 0, 0
+            return 0, 0, [], []
         if len(related_hashes) > 1:
             logger.info(
                 f"[CrossSeedView] 辅种回退命中 TransferHistory {len(histories)} 条 "
@@ -587,6 +617,8 @@ class CrossSeedView(_PluginBase):
 
         success = 0
         fail = 0
+        success_paths: List[str] = []
+        fail_paths: List[str] = []
         for history in histories:
             history_id = getattr(history, "id", None)
             history_src = getattr(history, "src", None) or ""
@@ -622,9 +654,13 @@ class CrossSeedView(_PluginBase):
 
                 if dest_ok:
                     success += 1
+                    if dest_path:
+                        success_paths.append(dest_path)
                     logger.info(f"[CrossSeedView] 已删除媒体链接：{dest_path}")
                 else:
                     fail += 1
+                    if dest_path:
+                        fail_paths.append(dest_path)
                     logger.warning(f"[CrossSeedView] 删除媒体链接失败：{dest_path}")
 
                 # 兜底刮削残留目录（无论 dest 删除是否成功都跑，v1.1.1 教训）
@@ -676,7 +712,7 @@ class CrossSeedView(_PluginBase):
                         f"[CrossSeedView] 删除 TransferHistory 失败 id={history_id}: {err}"
                     )
 
-        return success, fail
+        return success, fail, success_paths, fail_paths
 
     def delete_torrent(self, params: DeleteTorrentParams) -> Response:
         """删除指定下载器中的单个种子。
@@ -691,6 +727,8 @@ class CrossSeedView(_PluginBase):
             return Response(success=False, message="参数不完整")
         # v1.1.3：在 remove_torrents 之前抢救 content_path，供后续兜底查询
         content_path = self._lookup_content_paths([params.hash]).get(params.hash, "")
+        # v1.1.4：在 remove_torrents 之前抢救种子名，供通知使用
+        torrent_name = self._lookup_torrent_names([params.hash]).get(params.hash, "")
         try:
             ok = ChainBase().remove_torrents(
                 hashs=params.hash,
@@ -709,16 +747,23 @@ class CrossSeedView(_PluginBase):
         )
         # 连带清理媒体库软/硬链接（仅在“删种+文件”时）
         link_msg = ""
+        cleaned_success_paths: List[str] = []
+        cleaned_fail_paths: List[str] = []
+        cleaned_success = 0
+        cleaned_fail = 0
         if params.delete_files:
             try:
-                s, f = self._cleanup_links_for_hash(params.hash, content_path=content_path)
-                logger.info(
-                    f"[CrossSeedView] 媒体链接清理完成 hash={params.hash} 成功={s} 失败={f}"
+                cleaned_success, cleaned_fail, cleaned_success_paths, cleaned_fail_paths = (
+                    self._cleanup_links_for_hash(params.hash, content_path=content_path)
                 )
-                if f:
-                    link_msg = f"，媒体库链接清理 成功{s}/失败{f}"
-                elif s:
-                    link_msg = f"，已同步清理媒体库链接 {s} 个"
+                logger.info(
+                    f"[CrossSeedView] 媒体链接清理完成 hash={params.hash} "
+                    f"成功={cleaned_success} 失败={cleaned_fail}"
+                )
+                if cleaned_fail:
+                    link_msg = f"，媒体库链接清理 成功{cleaned_success}/失败{cleaned_fail}"
+                elif cleaned_success:
+                    link_msg = f"，已同步清理媒体库链接 {cleaned_success} 个"
                 else:
                     link_msg = "，无关联媒体库链接"
             except Exception as err:  # noqa: BLE001
@@ -733,10 +778,33 @@ class CrossSeedView(_PluginBase):
         if self._notify:
             try:
                 mode_txt = "删种+文件+清库" if params.delete_files else "仅删种"
+                lines = [mode_txt]
+                if torrent_name:
+                    lines.append(f"种子: {torrent_name}")
+                lines.append(f"hash: {params.hash[:8]}")
+                lines.append(f"下载器: {params.downloader}")
+                if params.delete_files:
+                    lines.append(
+                        f"媒体库链接: 清理 {cleaned_success} 个"
+                        + (f"，失败 {cleaned_fail} 个" if cleaned_fail else "")
+                    )
+                    if cleaned_success_paths:
+                        preview = cleaned_success_paths[:5]
+                        lines.append("已清理路径:")
+                        for p in preview:
+                            lines.append(f"  · {self._short_path(p, keep=40)}")
+                        if len(cleaned_success_paths) > 5:
+                            lines.append(f"  … 共 {len(cleaned_success_paths)} 项")
+                    if cleaned_fail_paths:
+                        lines.append("失败路径:")
+                        for p in cleaned_fail_paths[:5]:
+                            lines.append(f"  · {self._short_path(p, keep=40)}")
+                        if len(cleaned_fail_paths) > 5:
+                            lines.append(f"  … 共 {len(cleaned_fail_paths)} 项")
                 self.post_message(
                     mtype=NotificationType.Manual,
                     title="【辅种查看-单条删除】",
-                    text=f"{mode_txt}\nhash: {params.hash[:8]}\n下载器: {params.downloader}{link_msg}",
+                    text="\n".join(lines),
                 )
             except Exception as err:  # noqa: BLE001
                 logger.debug(f"[CrossSeedView] 发送删除通知失败（忽略）：{err}")
@@ -828,6 +896,8 @@ class CrossSeedView(_PluginBase):
         # v1.1.3：在 remove_torrents 之前抢救 content_path，供后续兜底查询
         all_hashes = [h for hs in by_dl.values() for h in hs]
         hash_to_path = self._lookup_content_paths(all_hashes)
+        # v1.1.4：同步抢救种子名，供通知使用
+        hash_to_name = self._lookup_torrent_names(all_hashes)
 
         total = sum(len(v) for v in by_dl.values())
         succeeded = 0
@@ -853,14 +923,20 @@ class CrossSeedView(_PluginBase):
         # 连带清理媒体库软/硬链接（仅在“删种+文件”时，且仅对下载器删除成功的种子）
         link_success = 0
         link_fail = 0
+        all_success_paths: List[str] = []
+        all_fail_paths: List[str] = []
+        per_hash_cleaned: Dict[str, int] = {}
         if params.delete_files and succeeded_hashs:
             for h in succeeded_hashs:
                 try:
-                    s, f = self._cleanup_links_for_hash(
+                    s, f, s_paths, f_paths = self._cleanup_links_for_hash(
                         h, content_path=hash_to_path.get(h, "")
                     )
                     link_success += s
                     link_fail += f
+                    all_success_paths.extend(s_paths)
+                    all_fail_paths.extend(f_paths)
+                    per_hash_cleaned[h] = s
                 except Exception as err:  # noqa: BLE001
                     logger.error(f"[CrossSeedView] 批量清理媒体链接异常 hash={h}: {err}")
                     link_fail += 1
@@ -893,11 +969,42 @@ class CrossSeedView(_PluginBase):
         if self._notify:
             try:
                 mode_txt = "删种+文件+清库" if params.delete_files else "仅删种"
-                fail_txt = ("\n失败：" + "; ".join(failed_dls)) if failed_dls else ""
+                lines = [mode_txt, f"成功 {succeeded}/{total} 项"]
+                # 每个种子简报：名字 + 清理数
+                named_hashs = [h for h in succeeded_hashs if hash_to_name.get(h)]
+                if named_hashs:
+                    lines.append("涉及种子:")
+                    preview_n = named_hashs[:5]
+                    for h in preview_n:
+                        name = hash_to_name.get(h, "")
+                        cleaned_n = per_hash_cleaned.get(h, 0)
+                        suffix = f"（清理 {cleaned_n}）" if params.delete_files else ""
+                        lines.append(f"  · {name}{suffix}")
+                    if len(named_hashs) > 5:
+                        lines.append(f"  … 共 {len(named_hashs)} 个")
+                if params.delete_files:
+                    lines.append(
+                        f"媒体库链接: 清理 {link_success} 个"
+                        + (f"，失败 {link_fail} 个" if link_fail else "")
+                    )
+                    if all_success_paths:
+                        lines.append("已清理路径:")
+                        for p in all_success_paths[:5]:
+                            lines.append(f"  · {self._short_path(p, keep=40)}")
+                        if len(all_success_paths) > 5:
+                            lines.append(f"  … 共 {len(all_success_paths)} 项")
+                    if all_fail_paths:
+                        lines.append("失败路径:")
+                        for p in all_fail_paths[:5]:
+                            lines.append(f"  · {self._short_path(p, keep=40)}")
+                        if len(all_fail_paths) > 5:
+                            lines.append(f"  … 共 {len(all_fail_paths)} 项")
+                if failed_dls:
+                    lines.append("失败：" + "; ".join(failed_dls))
                 self.post_message(
                     mtype=NotificationType.Manual,
                     title="【辅种查看-批量删除】",
-                    text=f"{mode_txt}\n成功 {succeeded}/{total} 项{link_msg}{fail_txt}",
+                    text="\n".join(lines),
                 )
             except Exception as err:  # noqa: BLE001
                 logger.debug(f"[CrossSeedView] 发送批量删除通知失败（忽略）：{err}")
