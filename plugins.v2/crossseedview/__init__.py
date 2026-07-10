@@ -71,7 +71,7 @@ class CrossSeedView(_PluginBase):
     plugin_name = "辅种查看"
     plugin_desc = "扫描所有下载器种子，按“种子名+大小”识别辅种关系，用可折叠卡片展示辅种数量、保存路径与明细，支持交互筛选与可选删除。"
     plugin_icon = "seed.png"
-    plugin_version = "1.1.2"
+    plugin_version = "1.1.3"
     plugin_label = "下载器"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "crossseedview_"
@@ -448,6 +448,36 @@ class CrossSeedView(_PluginBase):
 
         return removed
 
+    def _lookup_content_paths(self, hashes: List[str]) -> Dict[str, str]:
+        """从缓存 groups 中按 hash 取 save_path（content_path）。
+
+        v1.1.3 起：必须在 remove_torrents 之前调用，用返回的 path 作为
+        _cleanup_links_for_hash(content_path=...) 的兜底查询依据。种子从下载器
+        移除后，缓存最终会被 _refresh_cache 刷掉，届时 save_path 就永远拿不到了。
+        """
+        result: Dict[str, str] = {}
+        if not hashes:
+            return result
+        wanted = set(h for h in hashes if h)
+        if not wanted:
+            return result
+        try:
+            with self._cache_lock:
+                groups = list((self._cache or {}).get("groups") or [])
+            for g in groups:
+                if not wanted:
+                    break
+                for t in (g.get("torrents") or []):
+                    th = t.get("hash")
+                    if th and th in wanted:
+                        sp = t.get("save_path") or ""
+                        if sp and th not in result:
+                            result[th] = sp
+                        wanted.discard(th)
+        except Exception as err:  # noqa: BLE001
+            logger.debug(f"[CrossSeedView] 查询 content_path 失败 hashes={hashes}: {err}")
+        return result
+
     def _find_related_hashes(self, download_hash: str) -> List[str]:
         """从当前缓存中查找与该 hash 同组（相同 name+size）的所有辅种 hash。
 
@@ -472,18 +502,30 @@ class CrossSeedView(_PluginBase):
             logger.debug(f"[CrossSeedView] 查找同组辅种 hash 失败 {download_hash}: {err}")
         return result
 
-    def _cleanup_links_for_hash(self, download_hash: str) -> Tuple[int, int]:
-        """删除种子对应的媒体库软/硬链接（TransferHistory.dest_fileitem）。
+    def _cleanup_links_for_hash(
+        self,
+        download_hash: str,
+        content_path: Optional[str] = None,
+    ) -> Tuple[int, int]:
+        """联动 MoviePilot 原生"删除源文件和媒体库文件"流程清理辅种残留。
 
-        参照 transferfaildelete 插件：
-        - 依据 download_hash 查所有 TransferHistory 记录
-        - 逐条从 dest_fileitem 反序列化为 schemas.FileItem，调用 StorageChain().delete_media_file 清理
-        - 成功后清理 DownloadHistory 中对应路径记录，发出 DownloadFileDeleted 事件
-        - 无论 delete_media_file 是否成功，都尝试删除 TransferHistory 行，避免残留脏记录
+        对齐原生入口 `/api/v1/history/transfer?deletesrc=true&deletedest=true`
+        （`app/api/endpoints/history.py:delete_transfer_history`），每条 TransferHistory 执行：
+          1) dest_fileitem → StorageChain().delete_media_file 清媒体库软/硬链接 + 空目录
+          2) 兜底 _cleanup_scrape_leftover_dirs 清 .nfo/.jpg/字幕 等刮削残留
+          3) src_fileitem.path → DownloadFiles.delete_by_fullpath 清下载文件表
+             （物理源文件由下载器 remove_torrents(delete_file=True) 负责，不再重复 delete_media_file）
+          4) eventmanager.send_event(EventType.DownloadFileDeleted, {src: history.src, hash: history.download_hash})
+          5) TransferHistoryOper().delete(history.id)
 
-        辅种回退：如果按 download_hash 查不到 TransferHistory，会自动从缓存里
-        找到同组（相同 name+size）的其他辅种 hash，再次尝试查询。避免用户看到
-        "无媒体库关联"但媒体库文件仍残留的现象。
+        辅种三级回退查询 TransferHistory：
+          A) 主 hash list_by_hash
+          B) 缓存分组内同组辅种 hash 逐个 list_by_hash（辅种只会关联最先入库的 hash）
+          C) content_path（种子 save_path）→ get_by_src(path, "local") 兜底
+             覆盖"缓存里同组辅种已被删光但 TransferHistory 仍在"的场景
+
+        content_path 必须由调用方在 remove_torrents 之前从缓存 group 中取出，
+        否则种子从下载器移除后此路径无法再获取。
 
         返回 (成功数, 失败数)。仅处理本地存储链接，其他存储遇错不阻断主删除流程。
         """
@@ -502,7 +544,7 @@ class CrossSeedView(_PluginBase):
             logger.error(f"[CrossSeedView] 初始化清理组件失败 hash={download_hash}: {err}")
             return 0, 0
 
-        # 汇总所有相关 TransferHistory：自身 hash + 同组辅种 hash（按 id 去重）
+        # 汇总所有相关 TransferHistory：主 hash + 同组辅种 hash + content_path 兜底
         related_hashes = self._find_related_hashes(download_hash)
         histories_map: Dict[int, Any] = {}
         for h in related_hashes:
@@ -511,12 +553,30 @@ class CrossSeedView(_PluginBase):
                     histories_map[hist.id] = hist
             except Exception as err:  # noqa: BLE001
                 logger.debug(f"[CrossSeedView] 查询 TransferHistory 失败 hash={h}: {err}")
+
+        # content_path 兜底：hash 查空时，用种子 save_path 走 src 查询
+        # 覆盖"缓存里同组辅种已被删光但 TransferHistory 仍在"的场景
+        if not histories_map and content_path:
+            try:
+                hist = transfer_oper.get_by_src(content_path, "local")
+                if hist:
+                    histories_map[hist.id] = hist
+                    logger.info(
+                        f"[CrossSeedView] content_path 兜底命中 TransferHistory "
+                        f"id={hist.id} src={content_path} hash={download_hash}"
+                    )
+            except Exception as err:  # noqa: BLE001
+                logger.debug(
+                    f"[CrossSeedView] content_path 兜底查询失败 src={content_path}: {err}"
+                )
+
         histories = list(histories_map.values())
 
         if not histories:
             logger.info(
                 f"[CrossSeedView] 未找到关联 TransferHistory hash={download_hash} "
-                f"（已尝试同组辅种 {len(related_hashes)} 个 hash）"
+                f"（已尝试同组辅种 {len(related_hashes)} 个 hash"
+                f"{'+ content_path 兜底' if content_path else ''}）"
             )
             return 0, 0
         if len(related_hashes) > 1:
@@ -528,73 +588,93 @@ class CrossSeedView(_PluginBase):
         success = 0
         fail = 0
         for history in histories:
+            history_id = getattr(history, "id", None)
+            history_src = getattr(history, "src", None) or ""
+            history_dl_hash = getattr(history, "download_hash", None) or download_hash
+
             dest_fileitem = getattr(history, "dest_fileitem", None)
-            if not dest_fileitem:
-                # 无目标文件项：只清理 TransferHistory 记录
+            src_fileitem = getattr(history, "src_fileitem", None)
+
+            # ---- 1) 删媒体库软/硬链接（dest_fileitem）----
+            dest_ok = False
+            dest_path = ""
+            dest_item: Optional[schemas.FileItem] = None
+            if dest_fileitem:
                 try:
-                    transfer_oper.delete(history.id)
+                    dest_item = schemas.FileItem(**dest_fileitem)
+                    dest_path = getattr(dest_item, "path", None) or ""
                 except Exception as err:  # noqa: BLE001
-                    logger.debug(f"[CrossSeedView] 删除空目标 TransferHistory 失败 id={history.id}: {err}")
-                continue
+                    logger.warning(
+                        f"[CrossSeedView] 解析 dest_fileitem 失败 id={history_id} "
+                        f"hash={download_hash}: {err}"
+                    )
+                    dest_item = None
 
+            if dest_item is not None:
+                try:
+                    dest_ok = bool(storage_chain.delete_media_file(dest_item))
+                except Exception as err:  # noqa: BLE001
+                    logger.error(
+                        f"[CrossSeedView] 删除媒体链接异常 path={dest_path} "
+                        f"hash={download_hash}: {err}"
+                    )
+                    dest_ok = False
+
+                if dest_ok:
+                    success += 1
+                    logger.info(f"[CrossSeedView] 已删除媒体链接：{dest_path}")
+                else:
+                    fail += 1
+                    logger.warning(f"[CrossSeedView] 删除媒体链接失败：{dest_path}")
+
+                # 兜底刮削残留目录（无论 dest 删除是否成功都跑，v1.1.1 教训）
+                try:
+                    self._cleanup_scrape_leftover_dirs(dest_item, storage_chain)
+                except Exception as err:  # noqa: BLE001
+                    logger.debug(
+                        f"[CrossSeedView] 清理刮削残留目录异常 path={dest_path}: {err}"
+                    )
+
+            # ---- 2) 清 DownloadFiles 表（用 src 路径，对齐原生流程）----
+            # 注意：v1.1.2 之前误用了 dest_path，DownloadFiles 表存的是源路径，删不掉。
+            # 物理源文件已由 remove_torrents(delete_file=True) 交给下载器删，
+            # 这里不再重复调用 delete_media_file(src_fileitem)。
+            src_path = ""
+            if src_fileitem:
+                try:
+                    src_item = schemas.FileItem(**src_fileitem)
+                    src_path = getattr(src_item, "path", None) or ""
+                except Exception as err:  # noqa: BLE001
+                    logger.debug(
+                        f"[CrossSeedView] 解析 src_fileitem 失败 id={history_id}: {err}"
+                    )
+
+            if src_path:
+                try:
+                    from pathlib import Path as _P
+                    DownloadHistoryOper().delete_file_by_fullpath(_P(src_path).as_posix())
+                except Exception as err:  # noqa: BLE001
+                    logger.debug(
+                        f"[CrossSeedView] 清理 DownloadFiles 失败 src={src_path}: {err}"
+                    )
+
+            # ---- 3) 发 DownloadFileDeleted 事件（对齐原生流程）----
             try:
-                fileitem = schemas.FileItem(**dest_fileitem)
-            except Exception as err:  # noqa: BLE001
-                logger.warning(
-                    f"[CrossSeedView] 解析 dest_fileitem 失败 id={history.id} hash={download_hash}: {err}"
+                eventmanager.send_event(
+                    EventType.DownloadFileDeleted,
+                    {"src": history_src or src_path, "hash": history_dl_hash},
                 )
-                fail += 1
-                continue
-
-            file_path = getattr(fileitem, "path", None) or ""
-            try:
-                ok = storage_chain.delete_media_file(fileitem)
             except Exception as err:  # noqa: BLE001
-                logger.error(
-                    f"[CrossSeedView] 删除媒体链接异常 path={file_path} hash={download_hash}: {err}"
-                )
-                ok = False
+                logger.debug(f"[CrossSeedView] 发送 DownloadFileDeleted 事件失败：{err}")
 
-            if ok:
-                success += 1
-                logger.info(f"[CrossSeedView] 已删除媒体链接：{file_path}")
-                # 清理下载记录
-                if file_path:
-                    try:
-                        DownloadHistoryOper().delete_file_by_fullpath(file_path)
-                    except Exception as err:  # noqa: BLE001
-                        logger.debug(f"[CrossSeedView] 清理下载记录失败 path={file_path}: {err}")
-                    try:
-                        eventmanager.send_event(
-                            EventType.DownloadFileDeleted,
-                            {"src": file_path, "hash": download_hash},
-                        )
-                    except Exception as err:  # noqa: BLE001
-                        logger.debug(f"[CrossSeedView] 发送 DownloadFileDeleted 事件失败：{err}")
-            else:
-                fail += 1
-                logger.warning(f"[CrossSeedView] 删除媒体链接失败：{file_path}")
-
-            # 兜底清理刮削残留目录：无论 delete_media_file 是否成功都要跑。
-            # 因为常见场景就是软链接已被外部（重命名/手动删除）先删掉，导致
-            # delete_media_file 返回 False，但 .nfo/.jpg/字幕 仍残留在刮削目录里，
-            # 这时如果跳过兜底，用户就永远看到"没删干净"。
-            # StorageChain.delete_media_file 自身会因为目录残留非视频文件而 break，
-            # 这里只用 RMT_MEDIAEXT（纯视频扩展）判断，向上最多 2 层，
-            # 凡是不含视频文件的目录直接 delete_file，本地存储走 shutil.rmtree，
-            # 能一并清掉 .nfo/.jpg 等残留。
-            try:
-                self._cleanup_scrape_leftover_dirs(fileitem, storage_chain)
-            except Exception as err:  # noqa: BLE001
-                logger.debug(
-                    f"[CrossSeedView] 清理刮削残留目录异常 path={file_path}: {err}"
-                )
-
-            # 删除 TransferHistory 记录（无论媒体文件是否删除成功，都清理脏数据）
-            try:
-                transfer_oper.delete(history.id)
-            except Exception as err:  # noqa: BLE001
-                logger.debug(f"[CrossSeedView] 删除 TransferHistory 失败 id={history.id}: {err}")
+            # ---- 4) 删 TransferHistory 行（无论上面是否成功都清脏数据）----
+            if history_id is not None:
+                try:
+                    transfer_oper.delete(history_id)
+                except Exception as err:  # noqa: BLE001
+                    logger.debug(
+                        f"[CrossSeedView] 删除 TransferHistory 失败 id={history_id}: {err}"
+                    )
 
         return success, fail
 
@@ -609,6 +689,8 @@ class CrossSeedView(_PluginBase):
             return Response(success=False, message="删除功能未启用，请在插件设置中开启")
         if not params.hash or not params.downloader:
             return Response(success=False, message="参数不完整")
+        # v1.1.3：在 remove_torrents 之前抢救 content_path，供后续兜底查询
+        content_path = self._lookup_content_paths([params.hash]).get(params.hash, "")
         try:
             ok = ChainBase().remove_torrents(
                 hashs=params.hash,
@@ -629,7 +711,7 @@ class CrossSeedView(_PluginBase):
         link_msg = ""
         if params.delete_files:
             try:
-                s, f = self._cleanup_links_for_hash(params.hash)
+                s, f = self._cleanup_links_for_hash(params.hash, content_path=content_path)
                 logger.info(
                     f"[CrossSeedView] 媒体链接清理完成 hash={params.hash} 成功={s} 失败={f}"
                 )
@@ -743,6 +825,10 @@ class CrossSeedView(_PluginBase):
             if h and dl:
                 by_dl[dl].append(h)
 
+        # v1.1.3：在 remove_torrents 之前抢救 content_path，供后续兜底查询
+        all_hashes = [h for hs in by_dl.values() for h in hs]
+        hash_to_path = self._lookup_content_paths(all_hashes)
+
         total = sum(len(v) for v in by_dl.values())
         succeeded = 0
         succeeded_hashs: List[str] = []
@@ -770,7 +856,9 @@ class CrossSeedView(_PluginBase):
         if params.delete_files and succeeded_hashs:
             for h in succeeded_hashs:
                 try:
-                    s, f = self._cleanup_links_for_hash(h)
+                    s, f = self._cleanup_links_for_hash(
+                        h, content_path=hash_to_path.get(h, "")
+                    )
                     link_success += s
                     link_fail += f
                 except Exception as err:  # noqa: BLE001
