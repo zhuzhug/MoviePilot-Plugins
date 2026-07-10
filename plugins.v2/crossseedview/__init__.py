@@ -34,6 +34,7 @@ class SaveFiltersParams(BaseModel):
     sort_by: Optional[str] = Field(default=None, description="排序字段:count/size/name/seeding_time/uploaded")
     sort_order: Optional[str] = Field(default=None, description="排序方向:desc/asc")
     view_mode: Optional[str] = Field(default=None, description="视图模式:group(按分组)/downloader(按下载器)")
+    page: Optional[int] = Field(default=None, description="分页页码(1-based,不持久化)")
 
 
 class DeleteTorrentParams(BaseModel):
@@ -70,7 +71,7 @@ class CrossSeedView(_PluginBase):
     plugin_name = "辅种查看"
     plugin_desc = "扫描所有下载器种子，按“种子名+大小”识别辅种关系，用可折叠卡片展示辅种数量、保存路径与明细，支持交互筛选与可选删除。"
     plugin_icon = "seed.png"
-    plugin_version = "1.0.2"
+    plugin_version = "1.1.1"
     plugin_label = "下载器"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "crossseedview_"
@@ -110,6 +111,10 @@ class CrossSeedView(_PluginBase):
     _selected: Dict[str, str] = {}
     # 上次渲染时的可见种子列表 [(hash, downloader)]，用于全选/反选
     _last_visible: List[Tuple[str, str]] = []
+    # 详情页当前页码（1-based，非持久化，重启即回到 1）
+    _current_page: int = 1
+    # 每页分组数（详情页分页大小）
+    PAGE_SIZE: int = 50
     # endregion
 
     def init_plugin(self, config: dict = None) -> None:
@@ -143,6 +148,9 @@ class CrossSeedView(_PluginBase):
             self._sort_by = str(config.get("sort_by") or "count").strip() or "count"
             self._sort_order = str(config.get("sort_order") or "desc").strip() or "desc"
             self._view_mode = str(config.get("view_mode") or "group").strip() or "group"
+
+        # 每次初始化/重载后页码回到第一页
+        self._current_page = 1
 
         if not self._enabled:
             logger.info("[CrossSeedView] 插件未启用。")
@@ -282,24 +290,40 @@ class CrossSeedView(_PluginBase):
         """保存详情页筛选条件到插件配置。前端提交按钮直接调用。
 
         仅合并前端上送的字段，忽略 None，避免清空未展示的配置。
+        page 字段特殊处理：只更新 self._current_page（不写入 config，重启即回到 1）。
+        其他筛选条件变更时页码回到 1，避免定位到不存在的页。
         """
-        updates: Dict[str, Any] = {}
-        for key, value in params.dict(exclude_none=True).items():
-            updates[key] = value
-        if not updates:
+        raw: Dict[str, Any] = params.dict(exclude_none=True)
+        # page 是非持久化的翻页状态，单独处理
+        page_val = raw.pop("page", None)
+        page_only = (page_val is not None) and (not raw)
+
+        if raw:
+            # 其他筛选条件变化时页码回到第 1 页
+            self._current_page = 1
+            try:
+                current = self.get_config() or {}
+                current.update(raw)
+                self.update_config(current)
+                # 同步回内存实例变量，避免下次 render 前需要重载
+                for key, value in raw.items():
+                    attr = f"_{key}"
+                    if hasattr(self, attr):
+                        setattr(self, attr, value)
+            except Exception as err:  # noqa: BLE001
+                logger.error(f"[CrossSeedView] 保存筛选条件失败：{err}")
+                return Response(success=False, message=f"保存失败：{err}")
+
+        if page_val is not None:
+            try:
+                self._current_page = max(1, int(page_val))
+            except (TypeError, ValueError):
+                self._current_page = 1
+
+        if not raw and page_val is None:
             return Response(success=True, message="无变更")
-        try:
-            current = self.get_config() or {}
-            current.update(updates)
-            self.update_config(current)
-            # 同步回内存实例变量，避免下次 render 前需要重载
-            for key, value in updates.items():
-                attr = f"_{key}"
-                if hasattr(self, attr):
-                    setattr(self, attr, value)
-        except Exception as err:  # noqa: BLE001
-            logger.error(f"[CrossSeedView] 保存筛选条件失败：{err}")
-            return Response(success=False, message=f"保存失败：{err}")
+        if page_only:
+            return Response(success=True, message=f"已切换到第 {self._current_page} 页")
         return Response(success=True, message="已保存")
 
     def clear_filters(self) -> Response:
@@ -321,6 +345,8 @@ class CrossSeedView(_PluginBase):
                 attr = f"_{key}"
                 if hasattr(self, attr):
                     setattr(self, attr, value)
+            # 页码回到第一页
+            self._current_page = 1
         except Exception as err:  # noqa: BLE001
             logger.error(f"[CrossSeedView] 重置筛选条件失败：{err}")
             return Response(success=False, message=f"重置失败：{err}")
@@ -354,23 +380,27 @@ class CrossSeedView(_PluginBase):
         from pathlib import Path  # 局部导入避免顶部污染
 
         removed = 0
+        src_path = getattr(fileitem, "path", None) or ""
+        logger.info(f"[CrossSeedView] 兜底清理入口 src={src_path}")
         try:
             parent = storage_chain.get_parent_item(fileitem)
         except Exception as err:  # noqa: BLE001
-            logger.debug(f"[CrossSeedView] 取父目录失败：{err}")
+            logger.debug(f"[CrossSeedView] 取父目录失败 src={src_path}: {err}")
             return 0
 
         # 最多向上探测 2 层：一般刮削目录结构为 <媒体库根>/<分类>/<影片名>/<文件>
-        for _ in range(2):
+        for depth in range(2):
             if not parent:
                 break
             parent_path = getattr(parent, "path", None) or ""
             if not parent_path:
+                logger.debug("[CrossSeedView] 父目录路径为空，停止兜底")
                 break
+            logger.info(f"[CrossSeedView] 兜底探测第 {depth + 1} 层父目录：{parent_path}")
             # 安全边界：路径过浅一律不动
             try:
                 if len(Path(parent_path).parts) <= 2:
-                    logger.debug(f"[CrossSeedView] 父目录过浅，停止兜底：{parent_path}")
+                    logger.info(f"[CrossSeedView] 父目录过浅，停止兜底：{parent_path}")
                     break
             except Exception:  # noqa: BLE001
                 break
@@ -381,15 +411,15 @@ class CrossSeedView(_PluginBase):
                     parent, extensions=settings.RMT_MEDIAEXT
                 )
             except Exception as err:  # noqa: BLE001
-                logger.debug(
+                logger.warning(
                     f"[CrossSeedView] any_files 检查失败 path={parent_path}: {err}"
                 )
                 break
 
             if has_video is not False:
                 # True 或 None（不支持的存储）都不动
-                logger.debug(
-                    f"[CrossSeedView] 目录仍存在视频文件或无法确认，停止兜底：{parent_path}"
+                logger.info(
+                    f"[CrossSeedView] 目录仍存在视频文件或无法确认(has_video={has_video})，停止兜底：{parent_path}"
                 )
                 break
 
@@ -496,21 +526,24 @@ class CrossSeedView(_PluginBase):
                         )
                     except Exception as err:  # noqa: BLE001
                         logger.debug(f"[CrossSeedView] 发送 DownloadFileDeleted 事件失败：{err}")
-
-                # 兜底清理刮削残留目录：StorageChain.delete_media_file 会因为
-                # associated_dir 匹配失败或目录残留 .nfo/.jpg/字幕等文件而 break，
-                # 导致刮削目录仍在。这里只用 RMT_MEDIAEXT（纯视频扩展）判断，
-                # 递归向上最多 2 层，凡是不含视频文件的目录直接 delete_file，
-                # 本地存储的 delete 走 shutil.rmtree，能一并清掉 .nfo/.jpg 等残留。
-                try:
-                    self._cleanup_scrape_leftover_dirs(fileitem, storage_chain)
-                except Exception as err:  # noqa: BLE001
-                    logger.debug(
-                        f"[CrossSeedView] 清理刮削残留目录异常 path={file_path}: {err}"
-                    )
             else:
                 fail += 1
                 logger.warning(f"[CrossSeedView] 删除媒体链接失败：{file_path}")
+
+            # 兜底清理刮削残留目录：无论 delete_media_file 是否成功都要跑。
+            # 因为常见场景就是软链接已被外部（重命名/手动删除）先删掉，导致
+            # delete_media_file 返回 False，但 .nfo/.jpg/字幕 仍残留在刮削目录里，
+            # 这时如果跳过兜底，用户就永远看到"没删干净"。
+            # StorageChain.delete_media_file 自身会因为目录残留非视频文件而 break，
+            # 这里只用 RMT_MEDIAEXT（纯视频扩展）判断，向上最多 2 层，
+            # 凡是不含视频文件的目录直接 delete_file，本地存储走 shutil.rmtree，
+            # 能一并清掉 .nfo/.jpg 等残留。
+            try:
+                self._cleanup_scrape_leftover_dirs(fileitem, storage_chain)
+            except Exception as err:  # noqa: BLE001
+                logger.debug(
+                    f"[CrossSeedView] 清理刮削残留目录异常 path={file_path}: {err}"
+                )
 
             # 删除 TransferHistory 记录（无论媒体文件是否删除成功，都清理脏数据）
             try:
@@ -1131,14 +1164,26 @@ class CrossSeedView(_PluginBase):
             for g in filtered
         ]
 
+        # -------- 分页切片：只渲染当前页 --------
+        page_size = self.PAGE_SIZE
+        total_items = len(items)
+        total_pages = max(1, (total_items + page_size - 1) // page_size)
+        page = self._current_page if isinstance(self._current_page, int) else 1
+        if page < 1:
+            page = 1
+        if page > total_pages:
+            page = total_pages
+        # 若因外部变化触发页码越界，回写内存以保持一致
+        self._current_page = page
+        page_start = (page - 1) * page_size
+        page_end = page_start + page_size
+        page_items = items[page_start:page_end]
+
         # 记录当前可见且可勾选的 (hash, downloader) 集合，供 select_all/select_invert 使用
-        # 仅在允许删除且分组在前 MAX_DELETE_CARDS 内时，明细才有复选框（与下方渲染保持一致）
-        _MAX_VISIBLE_DELETE_CARDS = 50
+        # 全选/反选只作用于当前页
         visible: List[Tuple[str, str]] = []
         if self._allow_delete:
-            for idx, it in enumerate(items):
-                if idx >= _MAX_VISIBLE_DELETE_CARDS:
-                    break
+            for it in page_items:
                 for t in it.get("torrents") or []:
                     h = str(t.get("hash") or "")
                     dl = str(t.get("downloader") or "")
@@ -1148,7 +1193,8 @@ class CrossSeedView(_PluginBase):
 
         logger.info(
             f"[CrossSeedView] get_page: 总分组={len(groups)}，"
-            f"筛选后={len(filtered)}，下载器={selected_dl or '全部'}，"
+            f"筛选后={total_items}，本页={len(page_items)}(第{page}/{total_pages}页)，"
+            f"下载器={selected_dl or '全部'}，"
             f"名称={name_kw or '-'}，路径={path_kw or '-'}，"
             f"大小={self._size_min_gb}-{self._size_max_gb}GB"
         )
@@ -1389,7 +1435,6 @@ class CrossSeedView(_PluginBase):
         select_all_api = f"plugin/CrossSeedView/select_all?apikey={settings.API_TOKEN}"
         select_invert_api = f"plugin/CrossSeedView/select_invert?apikey={settings.API_TOKEN}"
         select_clear_api = f"plugin/CrossSeedView/select_clear?apikey={settings.API_TOKEN}"
-        MAX_DELETE_CARDS = 50
 
         def _torrent_row(t: dict, show_delete: bool) -> dict:
             thash = str(t.get("hash") or "")
@@ -1627,7 +1672,7 @@ class CrossSeedView(_PluginBase):
                         "class": "mr-2",
                         "prepend-icon": "mdi-checkbox-multiple-marked-outline",
                     },
-                    "text": f"已选 {selected_count} 项 / 当前可见 {len(visible)} 条",
+                    "text": f"已选 {selected_count} 项 / 本页可勾选 {len(visible)} 条",
                 },
             ]
             visible_count = len(visible)
@@ -1643,7 +1688,7 @@ class CrossSeedView(_PluginBase):
                         "class": "mr-1",
                         "disabled": visible_count == 0,
                     },
-                    "text": "全选可见",
+                    "text": "全选本页",
                     "events": {
                         "click": {
                             "api": select_all_api,
@@ -1663,7 +1708,7 @@ class CrossSeedView(_PluginBase):
                         "class": "mr-1",
                         "disabled": visible_count == 0,
                     },
-                    "text": "反选可见",
+                    "text": "反选本页",
                     "events": {
                         "click": {
                             "api": select_invert_api,
@@ -1791,8 +1836,8 @@ class CrossSeedView(_PluginBase):
             )
         else:
             group_cards: List[dict] = []
-            for idx, it in enumerate(items):
-                show_delete = self._allow_delete and idx < MAX_DELETE_CARDS
+            for idx, it in enumerate(page_items):
+                show_delete = self._allow_delete
                 torrents = it.get("torrents") or []
                 name_text = it["name"]
                 # 组头复选框：计算组的选中状态
@@ -2006,19 +2051,99 @@ class CrossSeedView(_PluginBase):
                         }
                     )
             card_list_content.extend(group_cards)
-            if self._allow_delete and len(items) > MAX_DELETE_CARDS:
-                card_list_content.append(
-                    {
-                        "component": "VAlert",
-                        "props": {
-                            "type": "info",
-                            "variant": "tonal",
-                            "density": "compact",
-                            "text": f"仅前 {MAX_DELETE_CARDS} 组显示删除按钮，如需删除其他分组请先筛选缩小范围。",
+            # 分页控件：仅当筛选后总页数 > 1 时显示
+            if total_pages > 1:
+                # 上一页 / 下一页按钮的 params，直接把目标页码写在静态 payload 里
+                prev_page = max(1, page - 1)
+                next_page = min(total_pages, page + 1)
+                pagination_row = {
+                    "component": "div",
+                    "props": {"class": "d-flex align-center justify-center flex-wrap ga-2 my-3"},
+                    "content": [
+                        {
+                            "component": "VBtn",
+                            "props": {
+                                "prependIcon": "mdi-chevron-left",
+                                "variant": "tonal",
+                                "size": "small",
+                                "disabled": page <= 1,
+                            },
+                            "text": "上一页",
+                            "events": {
+                                "click": {
+                                    "api": save_api,
+                                    "method": "post",
+                                    "params": {"page": prev_page},
+                                }
+                            },
                         },
-                    }
-                )
-            elif not self._allow_delete:
+                        {
+                            "component": "VChip",
+                            "props": {"color": "primary", "size": "small", "variant": "tonal"},
+                            "text": f"第 {page} / {total_pages} 页 · 共 {total_items} 组",
+                        },
+                        {
+                            "component": "VBtn",
+                            "props": {
+                                "appendIcon": "mdi-chevron-right",
+                                "variant": "tonal",
+                                "size": "small",
+                                "disabled": page >= total_pages,
+                            },
+                            "text": "下一页",
+                            "events": {
+                                "click": {
+                                    "api": save_api,
+                                    "method": "post",
+                                    "params": {"page": next_page},
+                                }
+                            },
+                        },
+                    ],
+                }
+                # 首页 / 末页快捷（仅在页数较多时提示）
+                if total_pages > 2:
+                    pagination_row["content"].insert(
+                        0,
+                        {
+                            "component": "VBtn",
+                            "props": {
+                                "prependIcon": "mdi-page-first",
+                                "variant": "text",
+                                "size": "small",
+                                "disabled": page <= 1,
+                            },
+                            "text": "首页",
+                            "events": {
+                                "click": {
+                                    "api": save_api,
+                                    "method": "post",
+                                    "params": {"page": 1},
+                                }
+                            },
+                        },
+                    )
+                    pagination_row["content"].append(
+                        {
+                            "component": "VBtn",
+                            "props": {
+                                "appendIcon": "mdi-page-last",
+                                "variant": "text",
+                                "size": "small",
+                                "disabled": page >= total_pages,
+                            },
+                            "text": "末页",
+                            "events": {
+                                "click": {
+                                    "api": save_api,
+                                    "method": "post",
+                                    "params": {"page": total_pages},
+                                }
+                            },
+                        }
+                    )
+                card_list_content.append(pagination_row)
+            if not self._allow_delete:
                 card_list_content.append(
                     {
                         "component": "VAlert",
@@ -2109,10 +2234,18 @@ class CrossSeedView(_PluginBase):
                                         },
                                         {
                                             "component": "p",
+                                            "props": {"class": "mb-2"},
+                                            "content": [
+                                                {"component": "strong", "text": "分页"},
+                                                {"component": "span", "text": "：分组较多时按每页 50 组分页展示。翻页保留当前筛选条件，「全选本页 / 反选本页」只会作用于当前页的分组。"},
+                                            ],
+                                        },
+                                        {
+                                            "component": "p",
                                             "props": {"class": "mb-0"},
                                             "content": [
                                                 {"component": "strong", "text": "删除按钮"},
-                                                {"component": "span", "text": "：默认关闭。到插件设置里开启「允许在详情页删除种子（危险）」后，前 50 组会出现两个按钮——「仅删种」保留文件仅从下载器移除；"},
+                                                {"component": "span", "text": "：默认关闭。到插件设置里开启「允许在详情页删除种子（危险）」后，每张分组卡片上都会出现两个按钮——「仅删种」保留文件仅从下载器移除；"},
                                                 {"component": "strong", "props": {"class": "text-error"}, "text": "「删种+文件+清库」"},
                                                 {"component": "span", "text": "在下载器删除种子和源文件的同时，会顺带清理媒体库里指向这些源文件的软/硬链接（读 TransferHistory 反向定位），操作不可撤销。"},
                                             ],
