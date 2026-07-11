@@ -89,7 +89,7 @@ class LibraryCleaner(_PluginBase):
     plugin_name = "媒体库清理"
     plugin_desc = "扫描媒体库残留：悬空软链、孤儿元数据、空目录、重复资源；支持单条/批量删除并级联清理同 inode 硬链与指向源的软链。"
     plugin_icon = "clean.png"
-    plugin_version = "0.2.1"
+    plugin_version = "0.2.2"
     plugin_label = "媒体库"
     plugin_author = "zhuzhug"
     author_url = "https://github.com/zhuzhug"
@@ -991,7 +991,6 @@ class LibraryCleaner(_PluginBase):
         refresh_url = f"/api/v1/plugin/LibraryCleaner/refresh?apikey={api_token}"
         delete_item_url = f"/api/v1/plugin/LibraryCleaner/delete_item?apikey={api_token}"
         delete_batch_url = f"/api/v1/plugin/LibraryCleaner/delete_batch?apikey={api_token}"
-        delete_item_url = f"/api/v1/plugin/LibraryCleaner/delete_item?apikey={api_token}"
 
         # 顶部信息条
         info_chips: List[dict] = []
@@ -1263,5 +1262,5 @@ class LibraryCleaner(_PluginBase):
         return None
 
     def get_render_mode(self) -> Tuple[str, Optional[str]]:
-        """使用默认 VueJSON 渲染。"""
-        return "vue", None
+        """使用 Vuetify JSON 渲染（get_page 返回的是 VuetifyJSON，不是 Vue 联邦组件）。"""
+        return "vuetify", None
