@@ -52,6 +52,12 @@ _CATEGORY_META: List[Tuple[str, str, str]] = [
 # 需要占位（v0.3.0 才实现）的分类
 _ADVANCED_CATEGORIES: Set[str] = {"dup_softlink", "dup_hardlink", "missing_video"}
 
+# Season 目录名识别（重复资源分组时需跳过 Season 目录，取上一层作品名做上下文）
+_SEASON_DIR_RE = re.compile(
+    r"^\s*(?:season[\s._-]*\d+|s\d+|第[一二三四五六七八九十百零〇\d]+季|specials?)\s*$",
+    flags=re.IGNORECASE,
+)
+
 # 去除发行标签：分辨率 / 编码 / 来源 / 音轨 / 语言 / HDR / 分组 等常见碎片
 # 用于把同目录下"同一部作品的不同版本"归一化为相同 stem
 _STEM_TRAIL_TOKENS = re.compile(
@@ -89,7 +95,7 @@ class LibraryCleaner(_PluginBase):
     plugin_name = "媒体库清理"
     plugin_desc = "扫描媒体库残留：悬空软链、孤儿元数据、空目录、重复资源；支持单条/批量删除并级联清理同 inode 硬链与指向源的软链。"
     plugin_icon = "clean.png"
-    plugin_version = "0.2.3"
+    plugin_version = "0.3.0"
     plugin_label = "媒体库"
     plugin_author = "zhuzhug"
     author_url = "https://github.com/zhuzhug"
@@ -261,12 +267,34 @@ class LibraryCleaner(_PluginBase):
                 self._scan_result = result
                 return self._summary_of(result)
 
+            # 跨目录/跨根共享的重复资源分组容器：
+            # key = "<上下文目录名>|<归一化stem>"，value = [文件路径, ...]
+            # 上下文目录取视频所在目录向上第一个非 Season 目录，
+            # 这样 /媒体库/短剧/捉妖执法队/S01E13.mp4 与 /媒体库/短剧/利刃出鞘/S01E13.mp4
+            # 会因上下文不同而分开；而 /媒体库/国产剧/夸世代/Season 1/xxx.mkv 与
+            # /媒体库/未分类/anistrm/国产剧/夸世代/Season 1/xxx.mkv 会因上下文相同而聚在一起。
+            dup_groups: Dict[str, List[str]] = defaultdict(list)
+
             for root in roots:
                 try:
-                    self._walk_and_collect(root, result, include_pat, exclude_pat)
+                    self._walk_and_collect(root, result, include_pat, exclude_pat, dup_groups)
                 except Exception as err:
                     result["errors"].append(f"扫描 {root} 失败：{err}")
                     logger.error(f"[LibraryCleaner] 扫描 {root} 失败：{err}")
+
+            # 全部根扫完后，一次性把跨目录重复分组结果落进 result
+            if self._enable_dup_resource:
+                for key, files in dup_groups.items():
+                    if len(files) <= 1:
+                        continue
+                    files.sort()
+                    keep = files[0]
+                    for fp in files[1:]:
+                        self._append_item(
+                            result,
+                            "dup_resource",
+                            {"path": fp, "target": keep, "group_key": key},
+                        )
 
             result["finished_at"] = time.time()
             self._scan_result = result
@@ -283,6 +311,7 @@ class LibraryCleaner(_PluginBase):
         result: Dict[str, Any],
         include_pat: Optional[re.Pattern],
         exclude_pat: Optional[re.Pattern],
+        dup_groups: Dict[str, List[str]],
     ) -> None:
         """遍历一个根目录，按启用的检测项收集条目。"""
         empty_candidates: List[str] = []
@@ -322,9 +351,10 @@ class LibraryCleaner(_PluginBase):
                 if os.path.abspath(dirpath) != os.path.abspath(root):
                     empty_candidates.append(dirpath)
 
-            # 4) 重复资源：同目录、去掉发行标签后 stem 相同的多个视频
+            # 4) 重复资源：全局跨目录分组
+            # key = "<上下文目录名>|<归一化stem>"，参与聚合的 videos 会被写入外部 dup_groups
             if self._enable_dup_resource:
-                groups: Dict[str, List[str]] = defaultdict(list)
+                ctx = self._dup_context_dir(dirpath)
                 for name in filenames:
                     ext = os.path.splitext(name)[1].lower()
                     if ext not in settings.RMT_MEDIAEXT:
@@ -338,21 +368,10 @@ class LibraryCleaner(_PluginBase):
                             continue
                     except OSError:
                         continue
-                    key = self._normalize_stem(name)
-                    if not key:
+                    stem_key = self._normalize_stem(name)
+                    if not stem_key:
                         continue
-                    groups[key].append(fp)
-                for key, files in groups.items():
-                    if len(files) <= 1:
-                        continue
-                    files.sort()
-                    keep = files[0]
-                    for fp in files[1:]:
-                        self._append_item(
-                            result,
-                            "dup_resource",
-                            {"path": fp, "target": keep, "group_key": key},
-                        )
+                    dup_groups[f"{ctx}|{stem_key}"].append(fp)
 
         # 二次核验空目录
         if self._enable_empty_dir:
@@ -450,6 +469,31 @@ class LibraryCleaner(_PluginBase):
         try:
             return os.readlink(path)
         except OSError:
+            return ""
+
+    @staticmethod
+    def _dup_context_dir(dirpath: str) -> str:
+        """取重复资源分组用的上下文目录名。
+
+        规则：从视频所在目录向上找，跳过 Season 目录（`Season 1` / `season01` / `S01` / `第一季` 等），
+        取第一个"作品/剧集"级目录名，作为归一化 key 的前缀，避免不同剧集的
+        `S01E13.mp4` 相互撞车。若找不到就退化用最后一级目录名。
+        """
+        try:
+            name = os.path.basename(os.path.normpath(dirpath))
+            parent = os.path.dirname(os.path.normpath(dirpath))
+            # 最多向上 3 层，避免死循环
+            for _ in range(3):
+                if not name:
+                    break
+                if not _SEASON_DIR_RE.match(name):
+                    return name.lower()
+                if not parent or parent == os.path.dirname(parent):
+                    break
+                name = os.path.basename(parent)
+                parent = os.path.dirname(parent)
+            return name.lower() if name else ""
+        except Exception:
             return ""
 
     @staticmethod
@@ -1086,6 +1130,126 @@ class LibraryCleaner(_PluginBase):
             "text": "尚未扫描或未配置扫描目录，请在设置中填写路径或先扫描一次。",
         }]
 
+        # 分类概览：每类一行 (图标 + 名称 + 计数 chip + 批量删除按钮)
+        summary_rows: List[dict] = []
+        enabled_map_all = {
+            "dangling": self._enable_dangling,
+            "orphan_meta": self._enable_orphan_meta,
+            "empty_dir": self._enable_empty_dir,
+            "dup_resource": self._enable_dup_resource,
+            "dup_softlink": self._enable_dup_softlink,
+            "dup_hardlink": self._enable_dup_hardlink,
+            "missing_video": self._enable_missing_video,
+        }
+        for cat_id, cat_title, cat_icon in _CATEGORY_META:
+            c = int(counts.get(cat_id, 0))
+            enabled = enabled_map_all.get(cat_id, False)
+            is_advanced = cat_id in _ADVANCED_CATEGORIES
+
+            # 计数 chip 颜色/文案
+            if is_advanced:
+                chip_color = "grey"
+                chip_text = "待实现"
+                chip_variant = "tonal"
+            elif not enabled:
+                chip_color = "grey"
+                chip_text = "未启用"
+                chip_variant = "tonal"
+            elif c == 0:
+                chip_color = "success"
+                chip_text = "0"
+                chip_variant = "tonal"
+            else:
+                chip_color = "warning"
+                chip_text = str(c)
+                chip_variant = "flat"
+
+            row_children: List[dict] = [
+                {
+                    "component": "VIcon",
+                    "props": {"class": "mr-2", "color": "primary" if enabled and not is_advanced else "grey"},
+                    "text": cat_icon,
+                },
+                {
+                    "component": "div",
+                    "props": {"class": "flex-grow-1", "style": "min-width: 0;"},
+                    "content": [{
+                        "component": "div",
+                        "props": {"class": "text-body-2"},
+                        "text": cat_title,
+                    }],
+                },
+                {
+                    "component": "VChip",
+                    "props": {
+                        "color": chip_color,
+                        "variant": chip_variant,
+                        "size": "small",
+                        "class": "mr-2",
+                    },
+                    "text": chip_text,
+                },
+            ]
+
+            # 批量删除按钮：需 allow_delete 且非高级分类且有条目
+            if self._allow_delete and enabled and not is_advanced and c > 0:
+                paths_to_delete = [
+                    it.get("path", "")
+                    for it in result["items"].get(cat_id, [])
+                    if it.get("path")
+                ]
+                row_children.append({
+                    "component": "VBtn",
+                    "props": {
+                        "color": "error",
+                        "variant": "tonal",
+                        "size": "small",
+                        "prependIcon": "mdi-delete-sweep",
+                        "events": {
+                            "click": {
+                                "api": delete_batch_url,
+                                "method": "post",
+                                "params": {
+                                    "category": cat_id,
+                                    "paths": paths_to_delete,
+                                },
+                            },
+                        },
+                    },
+                    "text": f"清理全部 ({c})",
+                })
+
+            summary_rows.append({
+                "component": "VListItem",
+                "props": {"density": "compact"},
+                "content": [{
+                    "component": "div",
+                    "props": {"class": "d-flex align-center", "style": "width: 100%;"},
+                    "content": row_children,
+                }],
+            })
+
+        summary_card = {
+            "component": "VCard",
+            "props": {"variant": "outlined", "class": "mb-3"},
+            "content": [
+                {
+                    "component": "VCardTitle",
+                    "props": {"class": "text-subtitle-1 pa-3 pb-1"},
+                    "text": "分类概览",
+                },
+                {
+                    "component": "VCardText",
+                    "props": {"class": "pa-0"},
+                    "content": [{
+                        "component": "VList",
+                        "props": {"density": "compact", "class": "pa-0"},
+                        "content": summary_rows,
+                    }],
+                },
+            ],
+        }
+
         errors = summary.get("errors", [])
         error_block = None
         if errors:
@@ -1136,7 +1300,7 @@ class LibraryCleaner(_PluginBase):
                 inner = [{
                     "component": "VAlert",
                     "props": {"type": "info", "variant": "tonal"},
-                    "text": f"「{cat_title}」将在 v0.3.0 版本提供。",
+                    "text": f"「{cat_title}」将在后续版本提供。",
                 }]
             elif not enabled_map.get(cat_id, False):
                 inner = [{
@@ -1267,6 +1431,7 @@ class LibraryCleaner(_PluginBase):
                 "content": dir_lines,
             }],
         })
+        page.append(summary_card)
         if error_block:
             page.append(error_block)
         page.append(tabs_block)
