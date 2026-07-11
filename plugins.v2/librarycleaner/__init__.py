@@ -89,7 +89,7 @@ class LibraryCleaner(_PluginBase):
     plugin_name = "媒体库清理"
     plugin_desc = "扫描媒体库残留：悬空软链、孤儿元数据、空目录、重复资源；支持单条/批量删除并级联清理同 inode 硬链与指向源的软链。"
     plugin_icon = "clean.png"
-    plugin_version = "0.2.0"
+    plugin_version = "0.2.1"
     plugin_label = "媒体库"
     plugin_author = "zhuzhug"
     author_url = "https://github.com/zhuzhug"
