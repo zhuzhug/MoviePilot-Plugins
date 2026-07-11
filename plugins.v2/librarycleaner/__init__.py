@@ -89,7 +89,7 @@ class LibraryCleaner(_PluginBase):
     plugin_name = "媒体库清理"
     plugin_desc = "扫描媒体库残留：悬空软链、孤儿元数据、空目录、重复资源；支持单条/批量删除并级联清理同 inode 硬链与指向源的软链。"
     plugin_icon = "clean.png"
-    plugin_version = "0.2.2"
+    plugin_version = "0.2.3"
     plugin_label = "媒体库"
     plugin_author = "zhuzhug"
     author_url = "https://github.com/zhuzhug"
@@ -331,8 +331,10 @@ class LibraryCleaner(_PluginBase):
                         continue
                     fp = os.path.join(dirpath, name)
                     try:
-                        # 只统计真实文件（软链视频不算重复资源，交给悬空软链/重复软链处理）
-                        if os.path.islink(fp):
+                        # 只跳过悬空软链（走"悬空软链"分类处理）；
+                        # 有效软链在 MP 默认转移模式下就是媒体库主体，必须参与重复分组，
+                        # 否则整个"重复资源"检测在软链媒体库里永远为 0。
+                        if os.path.islink(fp) and not os.path.exists(fp):
                             continue
                     except OSError:
                         continue
@@ -454,15 +456,28 @@ class LibraryCleaner(_PluginBase):
     def _normalize_stem(filename: str) -> str:
         """把文件名归一化为"版本无关"的 stem，用于重复资源分组。
 
-        步骤：去扩展 → 反复剥离尾部的发行标签（分辨率/编码/来源/音轨/HDR/语言等） →
-        统一空白 → 转小写。若剥完为空则返回空串。
+        步骤：
+        1. 去扩展名
+        2. 反复剥离尾部发行标签（分辨率/编码/来源/音轨/HDR/语言等）
+        3. 剥一次尾部发行组名（形如 `-GROUP`，末段含字母才算，避免误伤年份 `-1999`）
+        4. 去掉所有括号（`()[]`）保留内容
+        5. 统一空白/标点分隔符
+        6. 转小写
+
+        若剥完为空则返回空串。
         """
         stem = os.path.splitext(filename)[0]
+        # 去括号（保留括号内文字，比如年份）
+        stem = re.sub(r"[\[\]()]", " ", stem)
+        # 循环剥发行标签
         prev = None
         while prev != stem:
             prev = stem
             stem = _STEM_TRAIL_TOKENS.sub("", stem)
-        stem = re.sub(r"[\s._\-\[\]()]+$", "", stem)
+        # 再剥一次尾部发行组名：`-XXX` 且 XXX 含字母（避免误伤纯数字年份）
+        stem = re.sub(r"[\s._-]*-[A-Za-z][A-Za-z0-9]*\s*$", "", stem)
+        # 收尾清理
+        stem = re.sub(r"[\s._\-]+$", "", stem)
         stem = re.sub(r"[\s._\-]+", " ", stem).strip().lower()
         return stem
 
