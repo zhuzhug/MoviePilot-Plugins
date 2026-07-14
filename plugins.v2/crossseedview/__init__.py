@@ -77,7 +77,7 @@ class CrossSeedView(_PluginBase):
     plugin_name = "辅种查看"
     plugin_desc = "扫描所有下载器种子，按“种子名+大小”识别辅种关系，用可折叠卡片展示辅种数量、保存路径与明细，支持交互筛选与可选删除。"
     plugin_icon = "seed.png"
-    plugin_version = "1.1.9"
+    plugin_version = "1.2.0"
     plugin_label = "下载器"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "crossseedview_"
@@ -1584,6 +1584,7 @@ class CrossSeedView(_PluginBase):
 
         # 预设筛选按钮
         save_api = f"plugin/CrossSeedView/save_filters?apikey={settings.API_TOKEN}"
+        refresh_api = f"plugin/CrossSeedView/refresh?apikey={settings.API_TOKEN}"
         clear_api = f"plugin/CrossSeedView/clear_filters?apikey={settings.API_TOKEN}"
 
         def _preset_btn(label: str, color: str, data: Optional[dict], is_clear: bool = False) -> dict:
@@ -2622,44 +2623,68 @@ class CrossSeedView(_PluginBase):
             ],
         }
 
-        return [
-            help_panel,
-            {
-                "component": "VAlert",
-                "props": {
-                    "type": "warning" if snapshot.get("error") else "info",
-                    "variant": "tonal",
-                    "text": info_text,
+        # ── 顶部工具栏：状态行（紧凑，取代旧版 VAlert） + 刷新按钮 ──
+        info_bits = [f"扫描：{snapshot.get('updated_at') or '尚未扫描'}"]
+        dl_list = snapshot.get("downloaders") or []
+        if dl_list:
+            info_bits.append(f"下载器：{'、'.join(dl_list)}")
+        if filter_bits:
+            info_bits.append(f"筛选：{'、'.join(filter_bits)}（命中 {len(items)} 组）")
+        if snapshot.get("error"):
+            info_bits.append(f"⚠ {snapshot['error']}")
+        info_line = "｜".join(info_bits)
+
+        # 帮助下拉（取代旧的臃肿 VExpansionPanels）
+        help_items: List[dict] = [
+            {"component": "VListItem", "props": {"title": "种子（Torrent）：下载器里的一条任务，同一片资源来自不同站点即为不同种子", "density": "compact"}},
+            {"component": "VDivider", "props": {"class": "my-1"}},
+            {"component": "VListItem", "props": {"title": "分组（Group）：按「种子名+大小」聚合，同组种子即同资源在不同站的辅种", "density": "compact"}},
+            {"component": "VListItem", "props": {"title": "辅种数=1 → 孤种；≥2 → 跨站辅种", "density": "compact"}},
+            {"component": "VDivider", "props": {"class": "my-1"}},
+            {"component": "VListItem", "props": {"title": "用法：找孤种→仅孤种 / 清冗余→多辅种 / 排大文件→大文件", "density": "compact"}},
+            {"component": "VListItem", "props": {"title": "删除默认关闭，需在插件设置中开启", "density": "compact"}},
+        ]
+        help_tooltip = {
+            "component": "VBtn",
+            "props": {"icon": "mdi-help-circle-outline", "size": "x-small", "variant": "text", "color": "medium-emphasis", "class": "ml-1"},
+            "content": [{"component": "VMenu", "props": {"activator": "parent", "close-on-content-click": True}, "content": [{"component": "VCard", "props": {"maxWidth": 420}, "content": [{"component": "VList", "props": {"density": "compact"}, "content": help_items}]}]}],
+        }
+
+        toolbar_row = {
+            "component": "VRow",
+            "props": {"class": "mb-2 align-center"},
+            "content": [
+                {
+                    "component": "VCol",
+                    "props": {"cols": True},
+                    "content": [
+                        {
+                            "component": "div",
+                            "props": {"class": "text-caption text-medium-emphasis text-truncate"},
+                            "content": [
+                                {"component": "span", "text": info_line},
+                                help_tooltip,
+                            ],
+                        }
+                    ],
                 },
-            },
-            {
-                "component": "VRow",
-                "props": {"class": "mb-2"},
-                "content": [
-                    {
-                        "component": "VCol",
-                        "props": {"cols": 12, "md": 3},
-                        "content": [
-                            {
-                                "component": "VBtn",
-                                "props": {
-                                    "color": "primary",
-                                    "block": True,
-                                    "variant": "tonal",
-                                    "prepend-icon": "mdi-refresh",
-                                },
-                                "text": "立即重新扫描",
-                                "events": {
-                                    "click": {
-                                        "api": f"plugin/CrossSeedView/refresh?apikey={settings.API_TOKEN}",
-                                        "method": "get",
-                                    }
-                                },
-                            }
-                        ],
-                    }
-                ],
-            },
+                {
+                    "component": "VCol",
+                    "props": {"cols": "auto"},
+                    "content": [
+                        {
+                            "component": "VBtn",
+                            "props": {"color": "primary", "variant": "tonal", "prepend-icon": "mdi-refresh", "size": "x-small"},
+                            "text": "刷新",
+                            "events": {"click": {"api": refresh_api, "method": "get"}},
+                        }
+                    ],
+                },
+            ],
+        }
+
+        return [
+            toolbar_row,
             summary_row,
             summary_row_extra,
             preset_row,
