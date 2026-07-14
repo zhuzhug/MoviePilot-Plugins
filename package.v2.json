@@ -3,8 +3,9 @@
     "name": "辅种查看",
     "description": "跨下载器识别辅种，支持筛选、批量删种与媒体库链接联动清理。",
     "labels": "下载器",
-    "version": "1.1.5",
+    "version": "1.1.6",
     "history": {
+      "v1.1.6": "全量代码复核：修复配置字段兼容性，清理过时 path_keyword（字符串）历史残留，确保筛选重置可靠性。",
       "v1.1.5": "同步 plugin_desc 与市场 description 保持一致。",
       "v1.1.4": "增强删种通知与日志：单行/批量的\"删种+文件+清库\"完成后，通知与日志中新增种子名、每 hash 清理数、成功清理的媒体库路径预览（最多 5 条，短路径显示）、失败路径预览与 TransferHistory 计数汇总。批量场景按种子名分组展示 top 5，便于快速核对结果。仅提示信息增强，删除流程与安全语义与 v1.1.3 保持一致。",
       "v1.1.3": "对齐 MoviePilot 原生\"删除源文件和媒体库文件\"（/api/v1/history/transfer?deletesrc=true&deletedest=true）流程，修复 v1.1.2 遗留问题：1) DownloadFiles 清理误用 dest_fileitem.path，改为 src_fileitem.path（DownloadFiles 表存的是源路径）；2) TransferHistory 三级回退查询：主 hash → 同组辅种 hash → content_path（种子 save_path）走 get_by_src 兜底，覆盖\"缓存里同组辅种已被删光但 TransferHistory 仍在\"的场景；3) content_path 必须在 remove_torrents 之前从缓存抢救，否则种子从下载器移除后无法再获取。物理源文件仍由下载器 remove_torrents(delete_file=True) 负责，避免与 delete_media_file 冲突。",
