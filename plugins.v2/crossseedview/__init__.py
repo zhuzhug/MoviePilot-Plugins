@@ -77,7 +77,7 @@ class CrossSeedView(_PluginBase):
     plugin_name = "辅种查看"
     plugin_desc = "扫描所有下载器种子，按“种子名+大小”识别辅种关系，用可折叠卡片展示辅种数量、保存路径与明细，支持交互筛选与可选删除。"
     plugin_icon = "seed.png"
-    plugin_version = "1.1.8"
+    plugin_version = "1.1.9"
     plugin_label = "下载器"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "crossseedview_"
@@ -1672,23 +1672,34 @@ class CrossSeedView(_PluginBase):
             "text": current_dir_label,
             "content": [{"component": "VMenu", "props": {"activator": "parent", "close-on-content-click": True}, "content": [{"component": "VList", "props": {"density": "compact", "maxHeight": 300, "class": "overflow-y-auto"}, "content": dir_menu_items}]}],
         }
-        combo_items = [{"title": p, "value": p} for p, _ in top_paths] if top_paths else []
-        combo_widget = {
-            "component": "div",
-            "props": {"class": "d-flex align-center", "style": "flex: 1 1 auto; min-width: 0;"},
-            "content": [
-                {
-                    "component": "VCombobox",
-                    "props": {"label": "输入路径或关键词", "items": combo_items, "clearable": True, "density": "compact", "variant": "outlined", "hide-details": True, "style": "min-width: 160px;", "class": "mr-2"},
-                    "events": {"update:modelValue": {"api": set_filter_text_api, "method": "post"}},
-                },
-                {
-                    "component": "VBtn",
-                    "props": {"size": "small", "color": "primary", "variant": "tonal"},
-                    "text": "搜索",
-                    "events": {"click": {"api": set_filter_text_api, "method": "post", "params": {"value": ""}}},
-                },
-            ],
+
+        # 关键词下拉菜单
+        keyword_presets = [
+            ("(清除关键词)", "", "grey"),
+            ("4K/2160p", "4K|2160p", "primary"),
+            ("1080p", "1080p", "primary"),
+            ("BluRay", "BluRay", "primary"),
+            ("WEB-DL", "WEB-DL", "primary"),
+            ("HDR/DV", "HDR|DV|Dolby", "primary"),
+            ("国语音轨", "国语|国语音轨|普通话", "primary"),
+            ("中文字幕", "中文字幕|CHS|CHT|简繁", "primary"),
+        ]
+        kw_menu_items = []
+        for label, kw, color in keyword_presets:
+            active = bool(self._name_keyword) and (self._name_keyword == kw or (kw and self._name_keyword in kw))
+            kw_menu_items.append({
+                "component": "VListItem",
+                "props": {"title": label, "active": active, "color": "success" if active else None},
+                "events": {"click": {"api": save_api, "method": "post", "params": {"name_keyword": kw}}},
+            })
+        current_kw_label = "关键词 ▾"
+        if self._name_keyword:
+            current_kw_label = f"🏷 {self._name_keyword[:20]} ▾"
+        kw_dropdown = {
+            "component": "VBtn",
+            "props": {"color": "success" if self._name_keyword else "grey", "variant": "tonal" if not self._name_keyword else "flat", "size": "small", "class": "mr-2"},
+            "text": current_kw_label,
+            "content": [{"component": "VMenu", "props": {"activator": "parent", "close-on-content-click": True}, "content": [{"component": "VList", "props": {"density": "compact"}, "content": kw_menu_items}]}],
         }
 
 
@@ -1757,9 +1768,7 @@ class CrossSeedView(_PluginBase):
             }
         )
         # 目录下拉 + 手动输入行
-        filter_row_children: List[dict] = [dir_dropdown]
-        if combo_widget:
-            filter_row_children.append(combo_widget)
+        filter_row_children: List[dict] = [dir_dropdown, kw_dropdown]
         preset_row_children.append(
             {
                 "component": "div",
