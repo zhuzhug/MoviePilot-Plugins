@@ -45,6 +45,12 @@ class DeleteTorrentParams(BaseModel):
     delete_files: bool = Field(default=False, description="是否同时删除文件")
 
 
+class SetFilterTextParams(BaseModel):
+    """手动输入筛选文本。支持路径或名称关键词。"""
+
+    value: str = Field(default="", description="手动输入的路径或关键词")
+
+
 class ToggleSelectParams(BaseModel):
     """切换单个种子的选中状态。"""
 
@@ -71,7 +77,7 @@ class CrossSeedView(_PluginBase):
     plugin_name = "辅种查看"
     plugin_desc = "扫描所有下载器种子，按“种子名+大小”识别辅种关系，用可折叠卡片展示辅种数量、保存路径与明细，支持交互筛选与可选删除。"
     plugin_icon = "seed.png"
-    plugin_version = "1.1.7"
+    plugin_version = "1.1.8"
     plugin_label = "下载器"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "crossseedview_"
@@ -202,6 +208,13 @@ class CrossSeedView(_PluginBase):
                 "methods": ["GET"],
                 "auth": "bear",
                 "summary": "立即重新扫描所有下载器",
+            },
+            {
+                "path": "/set_filter_text",
+                "endpoint": self.set_filter_text,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "设置文本筛选（手动输入路径或关键词）",
             },
             {
                 "path": "/save_filters",
@@ -357,6 +370,25 @@ class CrossSeedView(_PluginBase):
             logger.error(f"[CrossSeedView] 重置筛选条件失败：{err}")
             return Response(success=False, message=f"重置失败：{err}")
         return Response(success=True, message="已重置")
+
+    def set_filter_text(self, params: SetFilterTextParams) -> Response:
+        val = (params.value or "").strip()
+        current = self.get_config() or {}
+        if "/" in val or "\\" in val:
+            current["path_keywords"] = [val] if val else []
+            current["name_keyword"] = ""
+        else:
+            current["name_keyword"] = val or ""
+            current["path_keywords"] = []
+        try:
+            self.update_config(current)
+            self._path_keywords = current.get("path_keywords") or []
+            self._name_keyword = current.get("name_keyword") or ""
+            self._current_page = 1
+        except Exception as err:
+            logger.error(f"[CrossSeedView] 设置文本筛选失败：{err}")
+            return Response(success=False, message=f"设置失败：{err}")
+        return Response(success=True, message=f"筛选已应用：{val or chr(65288)}全部{chr(65289)}")
 
     def _cleanup_scrape_leftover_dirs(self, fileitem, storage_chain) -> int:
         """兜底清理刮削残留目录。
@@ -798,13 +830,13 @@ class CrossSeedView(_PluginBase):
                         preview = cleaned_success_paths[:5]
                         lines.append("已清理路径:")
                         for p in preview:
-                            lines.append(f"  · {self._short_path(p, keep=40)}")
+                            lines.append(f"  · {_short_path(p, keep=40)}")
                         if len(cleaned_success_paths) > 5:
                             lines.append(f"  … 共 {len(cleaned_success_paths)} 项")
                     if cleaned_fail_paths:
                         lines.append("失败路径:")
                         for p in cleaned_fail_paths[:5]:
-                            lines.append(f"  · {self._short_path(p, keep=40)}")
+                            lines.append(f"  · {_short_path(p, keep=40)}")
                         if len(cleaned_fail_paths) > 5:
                             lines.append(f"  … 共 {len(cleaned_fail_paths)} 项")
                 self.post_message(
@@ -996,13 +1028,13 @@ class CrossSeedView(_PluginBase):
                     if all_success_paths:
                         lines.append("已清理路径:")
                         for p in all_success_paths[:5]:
-                            lines.append(f"  · {self._short_path(p, keep=40)}")
+                            lines.append(f"  · {_short_path(p, keep=40)}")
                         if len(all_success_paths) > 5:
                             lines.append(f"  … 共 {len(all_success_paths)} 项")
                     if all_fail_paths:
                         lines.append("失败路径:")
                         for p in all_fail_paths[:5]:
-                            lines.append(f"  · {self._short_path(p, keep=40)}")
+                            lines.append(f"  · {_short_path(p, keep=40)}")
                         if len(all_fail_paths) > 5:
                             lines.append(f"  … 共 {len(all_fail_paths)} 项")
                 if failed_dls:
@@ -1609,30 +1641,56 @@ class CrossSeedView(_PluginBase):
             prefix = "/".join(common)
             return prefix + "/" if prefix else ""
 
-        top_path_row_content: List[dict] = []
+        # directory dropdown menu (VMenu + VList, replaces old chips)
+        set_filter_text_api = f"plugin/CrossSeedView/set_filter_text?apikey={settings.API_TOKEN}"
+        paths_only = [p for p, _ in top_paths]
+        common_prefix = _common_dir_prefix(paths_only) if top_paths else ""
+        dir_menu_items: List[dict] = []
+        dir_menu_items.append({
+            "component": "VListItem",
+            "props": {"title": "（全部目录）", "active": not bool(self._path_keywords), "color": "primary"},
+            "events": {"click": {"api": save_api, "method": "post", "params": {"path_keywords": []}}},
+        })
         if top_paths:
-            paths_only = [p for p, _ in top_paths]
-            common_prefix = _common_dir_prefix(paths_only)
-            header_text = "常见目录："
-            if common_prefix:
-                header_text = f"常见目录（公共前缀 {common_prefix}）："
-            top_path_row_content.append(
-                {
-                    "component": "span",
-                    "props": {"class": "text-caption mr-3"},
-                    "text": header_text,
-                }
-            )
+            dir_menu_items.append({"component": "VDivider", "props": {"class": "my-1"}})
             for p, cnt in top_paths:
-                # 显示时去掉公共前缀；params 仍传完整路径保证过滤精确匹配
                 short = p[len(common_prefix):] if common_prefix and p.startswith(common_prefix) else p
                 short = short or "."
-                btn = _preset_btn(f"{_short_path(short)} ({cnt})", "grey", {"path_keywords": [p]})
-                # 高亮当前激活的目录
-                if p in (self._path_keywords or []):
-                    btn["props"]["variant"] = "flat"
-                    btn["props"]["color"] = "success"
-                top_path_row_content.append(btn)
+                active = p in (self._path_keywords or [])
+                dir_menu_items.append({
+                    "component": "VListItem",
+                    "props": {"title": f"{_short_path(short, 40)} ({cnt})", "subtitle": p, "active": active, "color": "success" if active else None},
+                    "events": {"click": {"api": save_api, "method": "post", "params": {"path_keywords": [p]}}},
+                })
+        current_dir_label = "目录筛选 ▾"
+        if self._path_keywords:
+            first = self._path_keywords[0]
+            current_dir_label = f"📁 {_short_path(first, 28)} ▾"
+        dir_dropdown = {
+            "component": "VBtn",
+            "props": {"color": "success" if self._path_keywords else "grey", "variant": "tonal" if not self._path_keywords else "flat", "size": "small", "class": "mr-2"},
+            "text": current_dir_label,
+            "content": [{"component": "VMenu", "props": {"activator": "parent", "close-on-content-click": True}, "content": [{"component": "VList", "props": {"density": "compact", "maxHeight": 300, "class": "overflow-y-auto"}, "content": dir_menu_items}]}],
+        }
+        combo_items = [{"title": p, "value": p} for p, _ in top_paths] if top_paths else []
+        combo_widget = {
+            "component": "div",
+            "props": {"class": "d-flex align-center", "style": "flex: 1 1 auto; min-width: 0;"},
+            "content": [
+                {
+                    "component": "VCombobox",
+                    "props": {"label": "输入路径或关键词", "items": combo_items, "clearable": True, "density": "compact", "variant": "outlined", "hide-details": True, "style": "min-width: 160px;", "class": "mr-2"},
+                    "events": {"update:modelValue": {"api": set_filter_text_api, "method": "post"}},
+                },
+                {
+                    "component": "VBtn",
+                    "props": {"size": "small", "color": "primary", "variant": "tonal"},
+                    "text": "搜索",
+                    "events": {"click": {"api": set_filter_text_api, "method": "post", "params": {"value": ""}}},
+                },
+            ],
+        }
+
 
         preset_row_children: List[dict] = [
             {
@@ -1698,14 +1756,17 @@ class CrossSeedView(_PluginBase):
                 "content": control_row_content,
             }
         )
-        if top_path_row_content:
-            preset_row_children.append(
-                {
-                    "component": "div",
-                    "props": {"class": "d-flex flex-wrap align-center mt-1"},
-                    "content": top_path_row_content,
-                }
-            )
+        # 目录下拉 + 手动输入行
+        filter_row_children: List[dict] = [dir_dropdown]
+        if combo_widget:
+            filter_row_children.append(combo_widget)
+        preset_row_children.append(
+            {
+                "component": "div",
+                "props": {"class": "d-flex flex-wrap align-center mt-1"},
+                "content": filter_row_children,
+            }
+        )
 
         preset_row = {
             "component": "VCard",
