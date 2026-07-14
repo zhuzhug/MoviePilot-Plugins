@@ -3,8 +3,9 @@
     "name": "辅种查看",
     "description": "跨下载器识别辅种，支持筛选、批量删种与媒体库链接联动清理。",
     "labels": "下载器",
-    "version": "1.1.9",
+    "version": "1.2.0",
     "history": {
+      "v1.2.0": "UI精简：移除臃肿的帮助面板和VAlert信息条，改为紧凑状态行（text-caption）+ ?帮助图标（VMenu）置于右上角，搭配刷新按钮。",
       "v1.1.9": "移除不可用的VCombobox+搜索按钮，替换为关键词预设下拉菜单（4K/1080p/BluRay/WEB-DL/HDR/国语/字幕），与目录下拉并列，全部使用VListItem click事件确保可靠。",
       "v1.1.8": "常见目录改为VMenu下拉列表，新增VCombobox手动输入路径/关键词筛选，新增 set_filter_text API。",
       "v1.1.7": "修复 get_page 中未定义变量 path_kw 导致的 NameError，导致详情页始终渲染为空的问题。",
