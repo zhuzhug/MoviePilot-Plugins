@@ -3,8 +3,9 @@
     "name": "辅种查看",
     "description": "跨下载器识别辅种，支持筛选、批量删种与媒体库链接联动清理。",
     "labels": "下载器",
-    "version": "1.1.7",
+    "version": "1.1.8",
     "history": {
+      "v1.1.8": "常见目录改为VMenu下拉列表，新增VCombobox手动输入路径/关键词筛选，新增 set_filter_text API。",
       "v1.1.7": "修复 get_page 中未定义变量 path_kw 导致的 NameError，导致详情页始终渲染为空的问题。",
       "v1.1.6": "全量代码复核：修复配置字段兼容性，清理过时 path_keyword（字符串）历史残留，确保筛选重置可靠性。",
       "v1.1.5": "同步 plugin_desc 与市场 description 保持一致。",
