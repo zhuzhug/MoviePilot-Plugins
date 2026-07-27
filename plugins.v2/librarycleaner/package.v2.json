@@ -1,0 +1,131 @@
+{
+    "id": "LibraryCleaner",
+    "name": "媒体库清理",
+    "author": "zhuzhug",
+    "description": "扫描媒体库残留与源数据残留：悬空软链、孤儿元数据、空目录、重复资源、已入库源文件、孤立源文件、源文件重复；支持全链路清理与保护目录机制。",
+    "version": "0.5.0",
+    "icon": "mdi-broom",
+    "level": 2,
+    "priority": 99,
+    "form": [
+        {
+            "component": "FormDivider",
+            "props": {
+                "content": "基本设置"
+            }
+        },
+        {
+            "field": "enabled",
+            "label": "启用插件",
+            "component": "VSwitch",
+            "props": {
+                "color": "primary"
+            }
+        },
+        {
+            "field": "scan_dirs",
+            "label": "扫描目录",
+            "component": "VField",
+            "type": "textarea",
+            "props": {
+                "rows": 3,
+                "placeholder": "每行一个目录路径"
+            },
+            "rules": ["required"]
+        },
+        {
+            "field": "cron",
+            "label": "定时扫描",
+            "component": "VField",
+            "props": {
+                "placeholder": "CRON 表达式，如 0 */6 * * * 表示每6小时扫描一次"
+            }
+        },
+        {
+            "component": "FormDivider",
+            "props": {
+                "content": "检测项设置"
+            }
+        },
+        {
+            "field": "enable_dangling",
+            "label": "悬空软链",
+            "component": "VSwitch",
+            "props": {
+                "color": "primary"
+            }
+        },
+        {
+            "field": "enable_orphan_meta",
+            "label": "孤儿元数据",
+            "component": "VSwitch",
+            "props": {
+                "color": "primary"
+            }
+        },
+        {
+            "field": "enable_empty_dir",
+            "label": "空目录",
+            "component": "VSwitch",
+            "props": {
+                "color": "primary"
+            }
+        },
+        {
+            "field": "enable_dup_resource",
+            "label": "重复资源",
+            "component": "VSwitch",
+            "props": {
+                "color": "primary"
+            }
+        },
+        {
+            "field": "enable_dup_softlink",
+            "label": "重复软链接",
+            "component": "VSwitch",
+            "props": {
+                "color": "primary"
+            }
+        },
+        {
+            "field": "enable_dup_hardlink",
+            "label": "重复硬链接",
+            "component": "VSwitch",
+            "props": {
+                "color": "primary"
+            }
+        },
+        {
+            "field": "enable_missing_video",
+            "label": "失联视频",
+            "component": "VSwitch",
+            "props": {
+                "color": "primary"
+            }
+        },
+        {
+            "component": "FormDivider",
+            "props": {
+                "content": "删除设置"
+            }
+        },
+        {
+            "field": "allow_delete",
+            "label": "允许删除",
+            "component": "VSwitch",
+            "props": {
+                "color": "primary"
+            }
+        },
+        {
+            "field": "max_display_per_type",
+            "label": "最大显示数量",
+            "component": "VField",
+            "type": "number",
+            "props": {
+                "min": 10,
+                "max": 1000
+            }
+        }
+    ]
+}
