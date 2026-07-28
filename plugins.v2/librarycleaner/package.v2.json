@@ -3,7 +3,7 @@
     "name": "媒体库清理",
     "author": "zhuzhug",
     "description": "扫描媒体库残留与源数据残留：悬空软链、孤儿元数据、空目录、重复资源、已入库源文件、孤立源文件、源文件重复；支持全链路清理与保护目录机制。",
-    "version": "0.5.0",
+    "version": "0.5.3",
     "icon": "mdi-broom",
     "level": 2,
     "priority": 99,
