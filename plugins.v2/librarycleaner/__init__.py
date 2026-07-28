@@ -105,7 +105,7 @@ class LibraryCleaner(_PluginBase):
     plugin_name = "媒体库清理"
     plugin_desc = "扫描媒体库残留与源数据残留：悬空软链、孤儿元数据、空目录、重复资源、已入库源文件、孤立源文件、源文件重复；支持全链路清理与保护目录机制。"
     plugin_icon = "clean.png"
-    plugin_version = "0.5.3"
+    plugin_version = "0.5.4"
     plugin_label = "媒体库"
     plugin_author = "zhuzhug"
     author_url = "https://github.com/zhuzhug"
@@ -1646,11 +1646,11 @@ class LibraryCleaner(_PluginBase):
     def get_page(self) -> List[dict]:
         """返回插件详情页 VueRender JSON。"""
         api_token = settings.API_TOKEN
-        refresh_url = f"plugin/LibraryCleaner/refresh?apikey={api_token}"
-        cancel_url = f"plugin/LibraryCleaner/cancel?apikey={api_token}"
-        scan_status_url = f"plugin/LibraryCleaner/scan_status?apikey={api_token}"
-        delete_item_url = f"plugin/LibraryCleaner/delete_item?apikey={api_token}"
-        delete_batch_url = f"plugin/LibraryCleaner/delete_batch?apikey={api_token}"
+        refresh_url = f"/api/v1/plugin/LibraryCleaner/refresh?apikey={api_token}"
+        cancel_url = f"/api/v1/plugin/LibraryCleaner/cancel?apikey={api_token}"
+        scan_status_url = f"/api/v1/plugin/LibraryCleaner/scan_status?apikey={api_token}"
+        delete_item_url = f"/api/v1/plugin/LibraryCleaner/delete_item?apikey={api_token}"
+        delete_batch_url = f"/api/v1/plugin/LibraryCleaner/delete_batch?apikey={api_token}"
 
         # 扫描中提示
         if self._scanning:
