@@ -42,13 +42,10 @@ _CATEGORY_META: List[Tuple[str, str, str]] = [
     ("orphan_meta", "孤儿元数据", "mdi-file-document-outline"),
     ("empty_dir", "空目录", "mdi-folder-open-outline"),
     ("dup_resource", "重复资源", "mdi-content-duplicate"),
-    ("dup_softlink", "重复软链接", "mdi-link-variant"),
-    ("dup_hardlink", "重复硬链接", "mdi-file-multiple"),
-    ("missing_video", "失联视频", "mdi-file-question-outline"),
 ]
 
-# 需要占位（v0.3.0 才实现）的分类
-_ADVANCED_CATEGORIES: Set[str] = {"dup_softlink", "dup_hardlink", "missing_video"}
+# 已移除的分类（v0.5.1 起不再扫描）
+_REMOVED_CATEGORIES: Set[str] = {"dup_softlink", "dup_hardlink", "missing_video"}
 
 # 源数据检测项元数据：id, 中文标题, 图标
 _SOURCE_CATEGORY_META: List[Tuple[str, str, str]] = [
@@ -108,7 +105,7 @@ class LibraryCleaner(_PluginBase):
     plugin_name = "媒体库清理"
     plugin_desc = "扫描媒体库残留与源数据残留：悬空软链、孤儿元数据、空目录、重复资源、已入库源文件、孤立源文件、源文件重复；支持全链路清理与保护目录机制。"
     plugin_icon = "clean.png"
-    plugin_version = "0.5.0"
+    plugin_version = "0.5.2"
     plugin_label = "媒体库"
     plugin_author = "zhuzhug"
     author_url = "https://github.com/zhuzhug"
@@ -143,6 +140,7 @@ class LibraryCleaner(_PluginBase):
 
     _scan_lock: Optional[threading.Lock] = None
     _scanning: bool = False
+    _cancel_event: Optional[threading.Event] = None
     _scan_result: Optional[Dict[str, Any]] = None
 
     def init_plugin(self, config: dict = None) -> None:
@@ -150,6 +148,7 @@ class LibraryCleaner(_PluginBase):
         self.stop_service()
         self._scan_lock = threading.Lock()
         self._scanning = False
+        self._cancel_event = threading.Event()
         self._scan_result = self._empty_result()
 
         if not config:
@@ -201,6 +200,20 @@ class LibraryCleaner(_PluginBase):
                 "methods": ["GET"],
                 "auth": "bear",
                 "summary": "立即扫描媒体库",
+            },
+            {
+                "path": "/cancel",
+                "endpoint": self.cancel_scan_api,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "取消正在执行的扫描",
+            },
+            {
+                "path": "/scan_status",
+                "endpoint": self.scan_status_api,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "获取扫描状态",
             },
             {
                 "path": "/result",
@@ -255,11 +268,25 @@ class LibraryCleaner(_PluginBase):
     # ---------------------------------------------------------------- API 端点
 
     def refresh_api(self) -> Dict[str, Any]:
-        """立即扫描一次媒体库，同步返回摘要。"""
+        """立即扫描一次媒体库，后台异步执行。"""
         if not self._enabled:
             return {"code": 1, "message": "插件未启用"}
-        summary = self._run_scan()
-        return {"code": 0, "message": "扫描完成", "data": summary}
+        if self._scanning:
+            return {"code": 0, "message": "已有扫描任务在执行"}
+        # 后台线程启动扫描，API 立即返回
+        threading.Thread(target=self._run_scan, daemon=True).start()
+        return {"code": 0, "message": "扫描已启动，完成后请刷新页面查看结果"}
+
+    def cancel_scan_api(self) -> Dict[str, Any]:
+        """取消正在执行的扫描。"""
+        if self._scanning:
+            self._cancel_event.set()
+            return {"code": 0, "message": "扫描取消请求已发送，正在停止"}
+        return {"code": 0, "message": "当前无扫描任务"}
+
+    def scan_status_api(self) -> Dict[str, Any]:
+        """返回扫描状态。"""
+        return {"code": 0, "data": {"scanning": self._scanning}}
 
     def result_api(self) -> Dict[str, Any]:
         """返回最近一次扫描结果的摘要。"""
@@ -275,6 +302,7 @@ class LibraryCleaner(_PluginBase):
             if self._scanning:
                 return {"message": "已有扫描任务在执行"}
             self._scanning = True
+        self._cancel_event.clear()
 
         try:
             started_at = time.time()
@@ -335,8 +363,13 @@ class LibraryCleaner(_PluginBase):
                         files.sort()
                         keep = files[0]
                         for fp in files[1:]:
+                            sz = 0
+                            try:
+                                sz = os.path.getsize(fp)
+                            except OSError:
+                                pass
                             self._append_item(result, "dup_resource",
-                                              {"path": fp, "target": keep, "group_key": key})
+                                              {"path": fp, "target": keep, "group_key": key, "size": sz})
 
                 if self._enable_dup_softlink:
                     for target, links in dup_softlink_groups.items():
@@ -389,6 +422,8 @@ class LibraryCleaner(_PluginBase):
         empty_candidates: List[str] = []
 
         for dirpath, dirnames, filenames in os.walk(root, followlinks=False, topdown=True):
+            if self._cancel_event.is_set():
+                break
             if not self._path_allowed(dirpath, include_pat, exclude_pat):
                 dirnames[:] = []
                 continue
@@ -400,7 +435,13 @@ class LibraryCleaner(_PluginBase):
                     try:
                         if os.path.islink(fp) and not os.path.exists(fp):
                             target = self._readlink_safe(fp)
-                            self._append_item(result, "dangling", {"path": fp, "target": target})
+                            sz = 0
+                            try:
+                                st = os.stat(fp)
+                                sz = st.st_size
+                            except OSError:
+                                pass
+                            self._append_item(result, "dangling", {"path": fp, "target": target, "size": sz})
                     except OSError:
                         continue
 
@@ -416,7 +457,12 @@ class LibraryCleaner(_PluginBase):
                         meta_files.append(os.path.join(dirpath, name))
                 if not has_video and meta_files:
                     for fp in meta_files:
-                        self._append_item(result, "orphan_meta", {"path": fp})
+                        sz = 0
+                        try:
+                            sz = os.path.getsize(fp)
+                        except OSError:
+                            pass
+                        self._append_item(result, "orphan_meta", {"path": fp, "size": sz})
 
             # 3) 空目录候选
             if self._enable_empty_dir and not dirnames and not filenames:
@@ -514,14 +560,19 @@ class LibraryCleaner(_PluginBase):
         }
 
     def _summary_of(self, result: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-        """生成摘要（含各分类计数与耗时）。"""
+        """生成摘要（含各分类计数、总大小与耗时）。"""
         if not result:
             result = self._empty_result()
         counts = {cat[0]: len(result["items"].get(cat[0], [])) for cat in _ALL_CATEGORY_META}
+        total_size = 0
+        for cat_id in counts:
+            for it in result["items"].get(cat_id, []):
+                total_size += int(it.get("size", 0))
         elapsed = max(0.0, result.get("finished_at", 0.0) - result.get("started_at", 0.0))
         return {
             "counts": counts,
             "total": sum(counts.values()),
+            "total_size": total_size,
             "scan_dirs": result.get("scan_dirs", []),
             "errors": result.get("errors", []),
             "started_at": result.get("started_at", 0.0),
@@ -647,6 +698,8 @@ class LibraryCleaner(_PluginBase):
         protected_dirs = self._get_protected_dirs()
 
         for dirpath, dirnames, filenames in os.walk(root, followlinks=False, topdown=True):
+            if self._cancel_event.is_set():
+                break
             if not self._path_allowed(dirpath, include_pat, exclude_pat):
                 dirnames[:] = []
                 continue
@@ -667,10 +720,16 @@ class LibraryCleaner(_PluginBase):
                     if transferred_paths is None:
                         transferred_paths = self._collect_transferred_paths()
                     if os.path.normpath(fp) in transferred_paths:
+                        sz = 0
+                        try:
+                            sz = os.path.getsize(fp)
+                        except OSError:
+                            pass
                         self._append_item(result, "source_transferred", {
                             "path": fp,
                             "target": "已入库",
                             "group_key": "已入库源文件",
+                            "size": sz,
                         })
 
             # 2) 孤立源文件：不被任何下载器跟踪的残留文件
@@ -692,10 +751,16 @@ class LibraryCleaner(_PluginBase):
                             is_tracked = True
                             break
                     if not is_tracked:
+                        sz = 0
+                        try:
+                            sz = os.path.getsize(fp)
+                        except OSError:
+                            pass
                         self._append_item(result, "source_orphan", {
                             "path": fp,
                             "target": "无下载器跟踪",
                             "group_key": "孤立源文件",
+                            "size": sz,
                         })
 
             # 3) 无效种子文件：.torrent 文件无对应下载器任务
@@ -821,6 +886,15 @@ class LibraryCleaner(_PluginBase):
             return os.readlink(path)
         except OSError:
             return ""
+
+    @staticmethod
+    def _fmt_size(n: int) -> str:
+        """格式化文件大小。"""
+        for u in ("B", "KB", "MB", "GB", "TB"):
+            if abs(n) < 1024:
+                return f"{n:.1f} {u}"
+            n /= 1024
+        return f"{n:.1f} PB"
 
     @staticmethod
     def _dup_context_dir(dirpath: str) -> str:
@@ -1571,14 +1645,70 @@ class LibraryCleaner(_PluginBase):
 
     def get_page(self) -> List[dict]:
         """返回插件详情页 VueRender JSON。"""
+        api_token = settings.API_TOKEN
+        refresh_url = f"plugin/LibraryCleaner/refresh?apikey={api_token}"
+        cancel_url = f"plugin/LibraryCleaner/cancel?apikey={api_token}"
+        scan_status_url = f"plugin/LibraryCleaner/scan_status?apikey={api_token}"
+        delete_item_url = f"plugin/LibraryCleaner/delete_item?apikey={api_token}"
+        delete_batch_url = f"plugin/LibraryCleaner/delete_batch?apikey={api_token}"
+
+        # 扫描中提示
+        if self._scanning:
+            return [
+                {
+                    "component": "VCard",
+                    "props": {"variant": "outlined", "class": "mb-3"},
+                    "content": [{
+                        "component": "VCardText",
+                        "content": [
+                            {
+                                "component": "div",
+                                "props": {"class": "d-flex align-center mb-3"},
+                                "content": [
+                                    {"component": "VProgressCircular", "props": {"indeterminate": True, "color": "primary", "size": 32, "class": "mr-3"}},
+                                    {"component": "div", "content": [
+                                        {"component": "div", "props": {"class": "text-h6"}, "text": "正在扫描媒体库..."},
+                                        {"component": "div", "props": {"class": "text-caption text-medium-emphasis"}, "text": "扫描过程中请勿关闭页面，完成后数据将自动显示"},
+                                    ]},
+                                ],
+                            },
+                            {
+                                "component": "div",
+                                "props": {"class": "d-flex align-center mt-3"},
+                                "content": [
+                                    {"component": "VProgressLinear", "props": {"indeterminate": True, "color": "primary", "class": "flex-grow-1 mr-3"}},
+                                    {
+                                        "component": "VBtn",
+                                        "props": {
+                                            "color": "error",
+                                            "variant": "tonal",
+                                            "size": "small",
+                                            "prependIcon": "mdi-close-circle",
+                                            "events": {"click": {"api": cancel_url, "method": "get"}},
+                                        },
+                                        "text": "取消",
+                                    },
+                                    {
+                                        "component": "VBtn",
+                                        "props": {
+                                            "color": "primary",
+                                            "variant": "flat",
+                                            "size": "small",
+                                            "prependIcon": "mdi-refresh",
+                                            "events": {"click": {"api": "plugin/LibraryCleaner/page?apikey=" + api_token, "method": "get"}},
+                                        },
+                                        "text": "刷新查看结果",
+                                    },
+                                ],
+                            },
+                        ],
+                    }],
+                },
+            ]
+
         result = self._scan_result or self._empty_result()
         summary = self._summary_of(result)
         counts = summary.get("counts", {})
-
-        api_token = settings.API_TOKEN
-        refresh_url = f"/api/v1/plugin/LibraryCleaner/refresh?apikey={api_token}"
-        delete_item_url = f"/api/v1/plugin/LibraryCleaner/delete_item?apikey={api_token}"
-        delete_batch_url = f"/api/v1/plugin/LibraryCleaner/delete_batch?apikey={api_token}"
 
         # 顶部信息条
         info_chips: List[dict] = []
@@ -1600,7 +1730,7 @@ class LibraryCleaner(_PluginBase):
                 "class": "mr-2",
                 "size": "small",
             },
-            "text": f"共 {summary.get('total', 0)} 项 · 耗时 {summary.get('elapsed_seconds', 0)}s",
+            "text": f"共 {summary.get('total', 0)} 项 · {self._fmt_size(summary.get('total_size', 0))} · 耗时 {summary.get('elapsed_seconds', 0)}s",
         })
         started = summary.get("started_at", 0.0)
         if started:
@@ -1807,158 +1937,117 @@ class LibraryCleaner(_PluginBase):
                 } for e in errors[:5]],
             }
 
-        # VTabs 分类结果
-        tabs_content: List[dict] = []
-        windows_content: List[dict] = []
+        # VExpansionPanels 分类结果（替代 VTabs，兼容 Vuetify JSON 无需双向绑定）
+        panels_content: List[dict] = []
+        enabled_map = {
+            "dangling": self._enable_dangling,
+            "orphan_meta": self._enable_orphan_meta,
+            "empty_dir": self._enable_empty_dir,
+            "dup_softlink": self._enable_dup_softlink,
+            "dup_hardlink": self._enable_dup_hardlink,
+            "missing_video": self._enable_missing_video,
+            "source_transferred": self._enable_source_transferred,
+            "source_orphan": self._enable_source_orphan,
+            "source_torrent": self._enable_source_torrent,
+            "source_dup": self._enable_source_dup,
+        }
 
         for cat_id, cat_title, cat_icon in _ALL_CATEGORY_META:
             is_source = cat_id in _SOURCE_CATEGORY_IDS
-            enabled_map = {
-                "dangling": self._enable_dangling,
-                "orphan_meta": self._enable_orphan_meta,
-                "empty_dir": self._enable_empty_dir,
-                "dup_softlink": self._enable_dup_softlink,
-                "dup_hardlink": self._enable_dup_hardlink,
-                "missing_video": self._enable_missing_video,
-                "source_transferred": self._enable_source_transferred,
-                "source_orphan": self._enable_source_orphan,
-                "source_torrent": self._enable_source_torrent,
-                "source_dup": self._enable_source_dup,
-            }
             c = counts.get(cat_id, 0)
+            cat_enabled = enabled_map.get(cat_id, False)
 
-            tab_label = cat_title
-            if c > 0:
-                tab_label = f"{cat_title} ({c})"
+            # 安全等级提示
+            _SAFETY = {
+                "dangling": ("safe", "安全可删", "软链目标已不存在，删除链接无任何影响"),
+                "orphan_meta": ("safe", "安全可删", "无对应视频的 .nfo/.jpg/.srt，不影响播放"),
+                "empty_dir": ("safe", "安全可删", "空目录可直接删除"),
+                "dup_resource": ("warn", "需确认", "同片不同版本（如 1080p vs 2160p），删除前确认保留哪个"),
+                "source_transferred": ("danger", "谨慎", "下载目录中已整理到媒体库的文件，删后无法恢复"),
+                "source_orphan": ("danger", "谨慎", "无下载任务跟踪，可能被其他工具使用"),
+                "source_torrent": ("warn", "需确认", ".torrent 文件残留"),
+                "source_empty_dir": ("safe", "安全可删", "源数据空目录"),
+                "source_dup": ("warn", "需确认", "下载目录中的重复文件"),
+            }
+            safety_level, safety_text, safety_desc = _SAFETY.get(cat_id, ("warn", "需确认", "删除前请确认"))
 
-            tabs_content.append({
-                "component": "VTab",
-                "props": {"value": cat_id},
-                "content": [
-                    {"component": "VIcon", "props": {"start": True, "color": "orange-darken-2" if is_source else None}, "text": cat_icon},
-                    {"component": "span", "text": tab_label},
-                ],
-            })
+            # 计算该分类总大小
+            cat_items = result["items"].get(cat_id, [])
+            total_size = sum(int(it.get("size", 0)) for it in cat_items)
+            size_label = f" ({self._fmt_size(total_size)})" if total_size > 0 else ""
 
-            # 分类内容
-            if not enabled_map.get(cat_id, False):
-                inner = [{
-                    "component": "VAlert",
-                    "props": {"type": "warning", "variant": "tonal"},
-                    "text": f"「{cat_title}」检测项未启用，请在设置中开启后重新扫描。",
-                }]
+            # 标题行：图标 + 名称 + 安全等级 chip + 计数 chip + 大小
+            safety_colors = {"safe": "success", "warn": "warning", "danger": "error"}
+            safety_icons = {"safe": "mdi-check-circle", "warn": "mdi-alert-circle", "danger": "mdi-shield-alert"}
+            title_content: List[dict] = [
+                {"component": "VIcon", "props": {"start": True, "color": "orange-darken-2" if is_source else ("primary" if cat_enabled else "grey")}, "text": cat_icon},
+                {"component": "span", "text": cat_title},
+            ]
+            if cat_enabled and c > 0:
+                title_content.append({"component": "VChip", "props": {"color": safety_colors.get(safety_level, "warning"), "variant": "tonal", "size": "x-small", "class": "ml-2", "prependIcon": safety_icons.get(safety_level, "mdi-alert")}, "text": safety_text})
+                title_content.append({"component": "VChip", "props": {"color": "warning", "variant": "flat", "size": "small", "class": "ml-1"}, "text": f"{c}{size_label}"})
+            elif cat_enabled:
+                title_content.append({"component": "VChip", "props": {"color": "success", "variant": "tonal", "size": "small", "class": "ml-2"}, "text": "0"})
+            else:
+                title_content.append({"component": "VChip", "props": {"color": "grey", "variant": "tonal", "size": "small", "class": "ml-2"}, "text": "未启用"})
+
+            # 面板内容
+            if not cat_enabled:
+                panel_inner = [{"component": "VAlert", "props": {"type": "warning", "variant": "tonal"}, "text": f"「{cat_title}」检测项未启用，请在设置中开启后重新扫描。"}]
             else:
                 items = result["items"].get(cat_id, [])
                 if not items:
-                    inner = [{
-                        "component": "VAlert",
-                        "props": {"type": "success", "variant": "tonal"},
-                        "text": f"未发现「{cat_title}」类残留。",
-                    }]
+                    panel_inner = [{"component": "VAlert", "props": {"type": "success", "variant": "tonal"}, "text": f"未发现「{cat_title}」类残留。"}]
                 else:
+                    # 安全说明
+                    desc_colors = {"safe": "success", "warn": "warning", "danger": "error"}
+                    panel_inner: List[dict] = [{
+                        "component": "VAlert",
+                        "props": {"type": desc_colors.get(safety_level, "info"), "variant": "tonal", "density": "compact", "class": "mb-2"},
+                        "content": [
+                            {"component": "div", "props": {"class": "text-body-2 font-weight-bold"}, "text": f"{safety_text}：{safety_desc}"},
+                        ],
+                    }]
                     rows = []
                     for it in items:
                         path = it.get("path", "")
                         target = it.get("target", "")
                         group_key = it.get("group_key", "")
-                        text_children = [{
-                            "component": "div",
-                            "props": {"style": "word-break: break-all; font-family: monospace; font-size: 0.875rem;"},
-                            "text": path,
-                        }]
+                        text_children = [{"component": "div", "props": {"style": "word-break: break-all; font-family: monospace; font-size: 0.875rem;"}, "text": path}]
                         subtitle_parts = []
+                        item_size = int(it.get("size", 0))
+                        if item_size > 0:
+                            subtitle_parts.append(f"大小: {self._fmt_size(item_size)}")
                         if target:
-                            subtitle_parts.append(f"→ {target}")
+                            subtitle_parts.append(f"-> {target}")
                         if group_key and cat_id == "dup_resource":
                             subtitle_parts.append(f"分组: {group_key}")
                         if subtitle_parts:
-                            text_children.append({
-                                "component": "div",
-                                "props": {"class": "text-caption text-medium-emphasis", "style": "word-break: break-all;"},
-                                "text": " · ".join(subtitle_parts),
-                            })
-
-                        item_children = [{
-                            "component": "div",
-                            "props": {"class": "flex-grow-1", "style": "min-width: 0;"},
-                            "content": text_children,
-                        }]
+                            text_children.append({"component": "div", "props": {"class": "text-caption text-medium-emphasis", "style": "word-break: break-all;"}, "text": " . ".join(subtitle_parts)})
+                        item_children = [{"component": "div", "props": {"class": "flex-grow-1", "style": "min-width: 0;"}, "content": text_children}]
                         if self._allow_delete:
-                            item_children.append({
-                                "component": "VBtn",
-                                "props": {
-                                    "icon": "mdi-delete",
-                                    "color": "error",
-                                    "variant": "text",
-                                    "size": "small",
-                                    "class": "ml-2",
-                                    "events": {
-                                        "click": {
-                                            "api": delete_item_url,
-                                            "method": "post",
-                                            "params": {
-                                                "path": path,
-                                                "category": cat_id,
-                                            },
-                                        },
-                                    },
-                                },
-                            })
-
-                        rows.append({
-                            "component": "VListItem",
-                            "props": {"density": "compact"},
-                            "content": [{
-                                "component": "div",
-                                "props": {"class": "d-flex align-center", "style": "width: 100%;"},
-                                "content": item_children,
-                            }],
-                        })
-                    inner = [{
-                        "component": "VList",
-                        "props": {"density": "compact", "lines": "two", "class": "pa-0"},
-                        "content": rows,
-                    }]
+                            item_children.append({"component": "VBtn", "props": {"icon": "mdi-delete", "color": "error", "variant": "text", "size": "small", "class": "ml-2", "events": {"click": {"api": delete_item_url, "method": "post", "params": {"path": path, "category": cat_id}}}}})
+                        rows.append({"component": "VListItem", "props": {"density": "compact"}, "content": [{"component": "div", "props": {"class": "d-flex align-center", "style": "width: 100%;"}, "content": item_children}]})
+                    panel_inner = [{"component": "VList", "props": {"density": "compact", "lines": "two", "class": "pa-0"}, "content": rows}]
                     if result.get("truncated", {}).get(cat_id):
-                        inner.append({
-                            "component": "VAlert",
-                            "props": {"type": "info", "variant": "tonal", "class": "mt-2"},
-                            "text": f"已达到每类展示上限（{self._max_display_per_type}），如需查看更多请调整设置中的展示上限。",
-                        })
+                        panel_inner.append({"component": "VAlert", "props": {"type": "info", "variant": "tonal", "class": "mt-2"}, "text": f"已达到每类展示上限（{self._max_display_per_type}），如需查看更多请调整设置中的展示上限。"})
 
-            windows_content.append({
-                "component": "VWindowItem",
-                "props": {"value": cat_id},
-                "content": [{
-                    "component": "VCard",
-                    "props": {"variant": "flat"},
-                    "content": [{
-                        "component": "VCardText",
-                        "content": inner,
-                    }],
-                }],
+            panels_content.append({
+                "component": "VExpansionPanel",
+                "content": [
+                    {"component": "VExpansionPanelTitle", "props": {"class": "text-body-2"}, "content": title_content},
+                    {"component": "VExpansionPanelText", "content": panel_inner},
+                ],
             })
 
         tabs_block = {
             "component": "VCard",
             "props": {"variant": "outlined"},
-            "content": [
-                {
-                    "component": "VTabs",
-                    "props": {
-                        "model": "active_tab",
-                        "grow": True,
-                        "showArrows": True,
-                    },
-                    "content": tabs_content,
-                },
-                {"component": "VDivider"},
-                {
-                    "component": "VWindow",
-                    "props": {"model": "active_tab"},
-                    "content": windows_content,
-                },
-            ],
+            "content": [{
+                "component": "VExpansionPanels",
+                "props": {"variant": "accordion"},
+                "content": panels_content,
+            }],
         }
 
         page = [header]
