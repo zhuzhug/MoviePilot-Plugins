@@ -9,7 +9,7 @@
     </v-card-text>
     <v-card-actions>
       <v-spacer />
-      <v-btn color="primary" @click="save">保存</v-btn>
+      <v-btn color="primary" @click="emit('save', config)">保存</v-btn>
     </v-card-actions>
   </v-card>
 </template>
@@ -19,17 +19,8 @@ import { ref } from 'vue'
 
 const props = defineProps({
   initialConfig: { type: Object, default: () => ({}) },
-  api: { type: Object, required: true },
-  pluginId: { type: String, required: true },
 })
 
 const emit = defineEmits(['save', 'close'])
 const config = ref({ ...props.initialConfig })
-
-async function save() {
-  try {
-    await props.api.post(`plugin/${props.pluginId}/config`, config.value)
-    emit('save', config.value)
-  } catch (e) { alert('保存失败') }
-}
 </script>
