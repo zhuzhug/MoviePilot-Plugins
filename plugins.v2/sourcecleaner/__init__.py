@@ -71,7 +71,7 @@ class SourceCleaner(_PluginBase):
     plugin_name = "源文件清理"
     plugin_desc = "扫描下载目录残留：悬空软链、孤儿元数据、空目录、重复资源，支持单条/批量删除并级联清理。"
     plugin_icon = "media-cleanup.png"
-    plugin_version = "2.0.2"
+    plugin_version = "2.0.3"
     plugin_label = "下载器"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "sourcecleaner_"
@@ -185,7 +185,69 @@ class SourceCleaner(_PluginBase):
         return "vuetify", None
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
-        return [], self._current_config()
+        """返回插件设置表单。"""
+        form = [
+            {
+                "component": "VForm",
+                "content": [
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件"}}]},
+                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{"component": "VSwitch", "props": {"model": "notify", "label": "扫描完成后发送通知"}}]},
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VSelect", "props": {"model": "scan_scope", "label": "扫描范围", "items": [{"title": "仅媒体库", "value": "media_only"}, {"title": "仅源数据", "value": "source_only"}, {"title": "全部", "value": "all"}]}}]}],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VTextarea", "props": {"model": "scan_dirs", "label": "自定义扫描目录（每行一个路径，留空使用 MP 目录配置）", "rows": 3, "placeholder": "/media/downloads/BT下载"}}]}],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSwitch", "props": {"model": "enable_dangling", "label": "检测悬空软链"}}]},
+                            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSwitch", "props": {"model": "enable_orphan_meta", "label": "检测孤儿元数据"}}]},
+                            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSwitch", "props": {"model": "enable_empty_dir", "label": "检测空目录"}}]},
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSwitch", "props": {"model": "enable_dup_resource", "label": "检测重复资源"}}]},
+                            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSwitch", "props": {"model": "enable_source_transferred", "label": "检测已入库源文件"}}]},
+                            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSwitch", "props": {"model": "enable_source_orphan", "label": "检测孤立源文件"}}]},
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSwitch", "props": {"model": "enable_source_torrent", "label": "检测无效种子文件"}}]},
+                            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSwitch", "props": {"model": "enable_source_empty_dir", "label": "检测源目录空目录"}}]},
+                            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "VSwitch", "props": {"model": "enable_source_dup", "label": "检测源文件重复"}}]},
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VTextarea", "props": {"model": "protected_dirs", "label": "保护目录（这些目录下的文件不会被删除，每行一个路径）", "rows": 2, "placeholder": "/media/downloads/BT下载/保种契约勿删"}}]}],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{"component": "VTextField", "props": {"model": "cron", "label": "定时扫描 CRON", "placeholder": "0 5 * * *"}}]},
+                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [{"component": "VTextField", "props": {"model": "max_display_per_type", "label": "每类最大展示条数", "type": "number"}}]},
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [{"component": "VCol", "props": {"cols": 12}, "content": [{"component": "VSwitch", "props": {"model": "allow_delete", "label": "启用删除按钮", "color": "error"}}]}],
+                    },
+                ],
+            }
+        ]
+        return form, self._current_config()
 
     def get_page(self) -> List[dict]:
         """返回 Vuetify JSON 详情页。"""
