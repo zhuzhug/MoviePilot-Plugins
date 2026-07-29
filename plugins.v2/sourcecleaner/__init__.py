@@ -71,7 +71,7 @@ class SourceCleaner(_PluginBase):
     plugin_name = "源文件清理"
     plugin_desc = "扫描下载目录残留：悬空软链、孤儿元数据、空目录、重复资源，支持单条/批量删除并级联清理。"
     plugin_icon = "media-cleanup.png"
-    plugin_version = "2.0.0"
+    plugin_version = "2.0.1"
     plugin_label = "下载器"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "sourcecleaner_"
