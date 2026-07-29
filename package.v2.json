@@ -1,15 +1,14 @@
 {
-    "SourceCleaner": {
-        "name": "源文件清理",
-        "description": "扫描下载目录残留：悬空软链、孤儿元数据、空目录、重复资源，支持单条/批量删除。Vue 前端，进度条+自动刷新。",
-        "labels": "下载器",
-        "version": "2.0.1",
-        "icon": "media-cleanup.png",
-        "author": "zhuzhug",
-        "level": 1,
-        "history": {
-            "v2.0.1": "修复配置保存接口，修复 Vue 前端 dist 结构，vite 配置对齐 MediaLibraryKeeper",
-            "v2.0.0": "全新 Vue 前端重构，进度条+自动刷新+侧栏导航+安全分级标签"
-        }
+  "SourceCleaner": {
+    "name": "源文件清理",
+    "description": "扫描下载目录残留：悬空软链、孤儿元数据、空目录、重复资源，支持单条/批量删除并级联清理。",
+    "labels": "下载器",
+    "version": "2.0.2",
+    "icon": "media-cleanup.png",
+    "author": "zhuzhug",
+    "level": 2,
+    "history": {
+      "v2.0.2": "改用Vuetify JSON渲染，修复前端pluginId undefined问题"
     }
+  }
 }
