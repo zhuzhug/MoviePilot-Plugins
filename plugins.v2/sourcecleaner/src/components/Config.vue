@@ -14,27 +14,22 @@
   </v-card>
 </template>
 
-<script>
-export default {
-  name: 'Config',
-  props: {
-    initialConfig: { type: Object, default: () => ({}) },
-    api: { type: Object, required: true },
-    pluginId: { type: String, required: true },
-  },
-  emits: ['save', 'close'],
-  data() {
-    return { config: { ...this.initialConfig } };
-  },
-  methods: {
-    async save() {
-      try {
-        await this.api.post(`plugin/${this.pluginId}/config`, this.config);
-        this.$emit('save', this.config);
-      } catch (e) {
-        alert('保存失败');
-      }
-    },
-  },
-};
+<script setup>
+import { ref } from 'vue'
+
+const props = defineProps({
+  initialConfig: { type: Object, default: () => ({}) },
+  api: { type: Object, required: true },
+  pluginId: { type: String, required: true },
+})
+
+const emit = defineEmits(['save', 'close'])
+const config = ref({ ...props.initialConfig })
+
+async function save() {
+  try {
+    await props.api.post(`plugin/${props.pluginId}/config`, config.value)
+    emit('save', config.value)
+  } catch (e) { alert('保存失败') }
+}
 </script>
