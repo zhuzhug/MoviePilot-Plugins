@@ -11,8 +11,6 @@ const _sfc_main = {
   __name: 'Config',
   props: {
   initialConfig: { type: Object, default: () => ({}) },
-  api: { type: Object, required: true },
-  pluginId: { type: String, required: true },
 },
   emits: ['save', 'close'],
   setup(__props, { emit: __emit }) {
@@ -21,13 +19,6 @@ const props = __props;
 
 const emit = __emit;
 const config = ref({ ...props.initialConfig });
-
-async function save() {
-  try {
-    await props.api.post(`plugin/${props.pluginId}/config`, config.value);
-    emit('save', config.value);
-  } catch (e) { alert('保存失败'); }
-}
 
 return (_ctx, _cache) => {
   const _component_v_card_title = _resolveComponent("v-card-title");
@@ -43,7 +34,7 @@ return (_ctx, _cache) => {
   return (_openBlock(), _createBlock(_component_v_card, { variant: "flat" }, {
     default: _withCtx(() => [
       _createVNode(_component_v_card_title, null, {
-        default: _withCtx(() => [...(_cache[4] || (_cache[4] = [
+        default: _withCtx(() => [...(_cache[5] || (_cache[5] = [
           _createTextVNode("源文件清理设置", -1)
         ]))]),
         _: 1
@@ -86,9 +77,9 @@ return (_ctx, _cache) => {
           _createVNode(_component_v_spacer),
           _createVNode(_component_v_btn, {
             color: "primary",
-            onClick: save
+            onClick: _cache[4] || (_cache[4] = $event => (emit('save', config.value)))
           }, {
-            default: _withCtx(() => [...(_cache[5] || (_cache[5] = [
+            default: _withCtx(() => [...(_cache[6] || (_cache[6] = [
               _createTextVNode("保存", -1)
             ]))]),
             _: 1
