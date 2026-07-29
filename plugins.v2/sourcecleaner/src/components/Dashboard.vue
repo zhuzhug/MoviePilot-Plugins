@@ -9,29 +9,29 @@
   </v-card>
 </template>
 
-<script>
-export default {
-  name: 'Dashboard',
-  props: {
-    config: { type: Object, default: () => ({}) },
-    allowRefresh: { type: Boolean, default: false },
-  },
-  data: () => ({ summary: null }),
-  mounted() { this.fetch(); },
-  methods: {
-    async fetch() {
-      try {
-        const resp = await this.$root.$api?.get('plugin/LibraryCleaner/result');
-        if (resp?.data) this.summary = resp.data;
-      } catch (e) { /* ignore */ }
-    },
-    formatSize(n) {
-      if (!n) return '0 B';
-      const u = ['B','KB','MB','GB','TB'];
-      let i = 0, s = n;
-      while (Math.abs(s) >= 1024 && i < u.length-1) { s /= 1024; i++; }
-      return s.toFixed(1) + ' ' + u[i];
-    },
-  },
-};
+<script setup>
+import { ref, onMounted } from 'vue'
+
+const props = defineProps({
+  config: { type: Object, default: () => ({}) },
+  allowRefresh: { type: Boolean, default: false },
+})
+
+const summary = ref(null)
+
+onMounted(async () => {
+  try {
+    const resp = await fetch('/api/v1/plugin/SourceCleaner/result?token=' + (window.__token || ''))
+    const data = await resp.json()
+    if (data.data) summary.value = data.data
+  } catch (e) { /* ignore */ }
+})
+
+function formatSize(n) {
+  if (!n) return '0 B'
+  const u = ['B', 'KB', 'MB', 'GB', 'TB']
+  let i = 0, s = n
+  while (Math.abs(s) >= 1024 && i < u.length - 1) { s /= 1024; i++ }
+  return s.toFixed(1) + ' ' + u[i]
+}
 </script>
