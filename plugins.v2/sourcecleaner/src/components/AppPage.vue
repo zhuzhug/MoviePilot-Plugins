@@ -21,7 +21,6 @@
 
     <v-main>
       <v-container fluid>
-        <!-- 扫描中状态 -->
         <v-card v-if="scanning" variant="outlined" class="mb-4">
           <v-card-text class="text-center py-8">
             <v-progress-circular indeterminate color="primary" size="64" class="mb-4" />
@@ -31,12 +30,10 @@
           </v-card-text>
         </v-card>
 
-        <!-- 扫描结果 -->
         <template v-else-if="summary && summary.total > 0">
-          <!-- 概览卡片 -->
           <v-row class="mb-4">
             <v-col v-for="cat in categories" :key="cat.id" cols="6" md="3">
-              <v-card variant="outlined" :color="getSafetyColor(cat.safety)" class="cursor-pointer" @click="selectedTab = cat.id">
+              <v-card variant="outlined" :color="getSafetyColor(cat.safety)" class="cursor-pointer" @click="expandedPanels = [cat.id]">
                 <v-card-text class="text-center py-3">
                   <v-icon :color="getSafetyColor(cat.safety)" size="28" class="mb-1">{{ cat.icon }}</v-icon>
                   <div class="text-body-2 font-weight-bold">{{ cat.title }}</div>
@@ -48,14 +45,13 @@
             </v-col>
           </v-row>
 
-          <!-- 分类详情 -->
           <v-expansion-panels v-model="expandedPanels">
             <v-expansion-panel v-for="cat in categories" :key="cat.id" :value="cat.id">
               <v-expansion-panel-title>
                 <v-icon :color="getSafetyColor(cat.safety)" class="mr-2">{{ cat.icon }}</v-icon>
                 {{ cat.title }}
                 <v-spacer />
-                <v-chip :color="getSafetyColor(cat.safety)" variant="tonal" size="x-small" class="mr-2" prepend-icon="mdi-shield">
+                <v-chip :color="getSafetyColor(cat.safety)" variant="tonal" size="x-small" class="mr-2">
                   {{ cat.safetyLabel }}
                 </v-chip>
                 <v-chip color="warning" variant="flat" size="small">
@@ -81,14 +77,13 @@
                   </v-list-item>
                 </v-list>
                 <v-alert v-if="summary.truncated[cat.id]" type="info" variant="tonal" density="compact" class="mt-2">
-                  已达到展示上限（{{ maxDisplay }}），如需查看更多请调整设置
+                  已达到展示上限
                 </v-alert>
               </v-expansion-panel-text>
             </v-expansion-panel>
           </v-expansion-panels>
         </template>
 
-        <!-- 空状态 -->
         <v-card v-else variant="outlined">
           <v-card-text class="text-center py-12">
             <v-icon size="64" color="grey-lighten-1" class="mb-4">mdi-magnify-close</v-icon>
@@ -101,98 +96,78 @@
   </v-app>
 </template>
 
-<script>
-export default {
-  name: 'AppPage',
-  props: {
-    api: { type: Object, required: true },
-    pluginId: { type: String, required: true },
-    navKey: { type: String, default: 'main' },
-  },
-  data: () => ({
-    scanning: false,
-    summary: null,
-    items: {},
-    expandedPanels: [],
-    selectedTab: null,
-    maxDisplay: 200,
-    allowDelete: false,
-    categories: [
-      { id: 'dangling', title: '悬空软链', icon: 'mdi-link-variant-off', safety: 'safe', safetyLabel: '安全可删', safetyDesc: '软链目标已不存在，删除链接无任何影响' },
-      { id: 'orphan_meta', title: '孤儿元数据', icon: 'mdi-file-document-outline', safety: 'safe', safetyLabel: '安全可删', safetyDesc: '无对应视频的 .nfo/.jpg/.srt，不影响播放' },
-      { id: 'empty_dir', title: '空目录', icon: 'mdi-folder-open-outline', safety: 'safe', safetyLabel: '安全可删', safetyDesc: '空目录可直接删除' },
-      { id: 'dup_resource', title: '重复资源', icon: 'mdi-content-duplicate', safety: 'warn', safetyLabel: '需确认', safetyDesc: '同片不同版本，删除前确认保留哪个' },
-      { id: 'source_transferred', title: '已入库源文件', icon: 'mdi-file-check', safety: 'danger', safetyLabel: '谨慎', safetyDesc: '下载目录中已整理到媒体库的文件' },
-      { id: 'source_orphan', title: '孤立源文件', icon: 'mdi-file-question', safety: 'danger', safetyLabel: '谨慎', safetyDesc: '无下载任务跟踪，可能被其他工具使用' },
-      { id: 'source_torrent', title: '无效种子文件', icon: 'mdi-file-remove-outline', safety: 'warn', safetyLabel: '需确认', safetyDesc: '.torrent 文件残留' },
-      { id: 'source_empty_dir', title: '源目录空目录', icon: 'mdi-folder-open-outline', safety: 'safe', safetyLabel: '安全可删', safetyDesc: '源数据空目录' },
-      { id: 'source_dup', title: '源文件重复', icon: 'mdi-file-multiple', safety: 'warn', safetyLabel: '需确认', safetyDesc: '下载目录中的重复文件' },
-    ],
-  }),
-  mounted() {
-    this.fetchResult();
-  },
-  methods: {
-    async fetchResult() {
-      try {
-        const resp = await this.api.get(`plugin/${this.pluginId}/result`);
-        if (resp.data) {
-          this.summary = resp.data;
-          this.items = resp.data.items || {};
-          this.maxDisplay = resp.data.max_display || 200;
-          this.allowDelete = resp.data.allow_delete || false;
-        }
-      } catch (e) {
-        console.error('获取结果失败', e);
-      }
-    },
-    async startScan() {
-      this.scanning = true;
-      try {
-        await this.api.get(`plugin/${this.pluginId}/scan`);
-        await this.fetchResult();
-      } catch (e) {
-        console.error('扫描失败', e);
-      } finally {
-        this.scanning = false;
-      }
-    },
-    async cancelScan() {
-      try {
-        await this.api.get(`plugin/${this.pluginId}/cancel`);
-      } catch (e) {
-        console.error('取消失败', e);
-      }
-    },
-    async deleteItem(path, category) {
-      if (!confirm(`确认删除？\n${path}`)) return;
-      try {
-        await this.api.post(`plugin/${this.pluginId}/delete_item`, { path, category });
-        await this.fetchResult();
-      } catch (e) {
-        alert('删除失败：' + (e.message || e));
-      }
-    },
-    getItems(categoryId) {
-      return (this.items[categoryId] || []).slice(0, this.maxDisplay);
-    },
-    getCategorySize(categoryId) {
-      return (this.items[categoryId] || []).reduce((sum, it) => sum + (it.size || 0), 0);
-    },
-    formatSize(n) {
-      if (!n || n === 0) return '0 B';
-      const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-      let i = 0;
-      let size = n;
-      while (Math.abs(size) >= 1024 && i < units.length - 1) { size /= 1024; i++; }
-      return size.toFixed(1) + ' ' + units[i];
-    },
-    getSafetyColor(safety) {
-      return { safe: 'success', warn: 'warning', danger: 'error' }[safety] || 'grey';
-    },
-    getSafetyType(safety) {
-      return { safe: 'success', warn: 'warning', danger: 'error' }[safety] || 'info';
-    },
-  },
-};
+<script setup>
+import { ref, onMounted } from 'vue'
+
+const props = defineProps({
+  api: { type: Object, required: true },
+  pluginId: { type: String, required: true },
+  navKey: { type: String, default: 'main' },
+})
+
+const scanning = ref(false)
+const summary = ref(null)
+const items = ref({})
+const expandedPanels = ref([])
+const maxDisplay = ref(200)
+const allowDelete = ref(false)
+
+const categories = [
+  { id: 'dangling', title: '悬空软链', icon: 'mdi-link-variant-off', safety: 'safe', safetyLabel: '安全可删', safetyDesc: '软链目标已不存在，删除链接无任何影响' },
+  { id: 'orphan_meta', title: '孤儿元数据', icon: 'mdi-file-document-outline', safety: 'safe', safetyLabel: '安全可删', safetyDesc: '无对应视频的 .nfo/.jpg/.srt，不影响播放' },
+  { id: 'empty_dir', title: '空目录', icon: 'mdi-folder-open-outline', safety: 'safe', safetyLabel: '安全可删', safetyDesc: '空目录可直接删除' },
+  { id: 'dup_resource', title: '重复资源', icon: 'mdi-content-duplicate', safety: 'warn', safetyLabel: '需确认', safetyDesc: '同片不同版本，删除前确认保留哪个' },
+  { id: 'source_transferred', title: '已入库源文件', icon: 'mdi-file-check', safety: 'danger', safetyLabel: '谨慎', safetyDesc: '下载目录中已整理到媒体库的文件' },
+  { id: 'source_orphan', title: '孤立源文件', icon: 'mdi-file-question', safety: 'danger', safetyLabel: '谨慎', safetyDesc: '无下载任务跟踪，可能被其他工具使用' },
+  { id: 'source_torrent', title: '无效种子文件', icon: 'mdi-file-remove-outline', safety: 'warn', safetyLabel: '需确认', safetyDesc: '.torrent 文件残留' },
+  { id: 'source_empty_dir', title: '源目录空目录', icon: 'mdi-folder-open-outline', safety: 'safe', safetyLabel: '安全可删', safetyDesc: '源数据空目录' },
+  { id: 'source_dup', title: '源文件重复', icon: 'mdi-file-multiple', safety: 'warn', safetyLabel: '需确认', safetyDesc: '下载目录中的重复文件' },
+]
+
+onMounted(() => { fetchResult() })
+
+async function fetchResult() {
+  try {
+    const resp = await props.api.get(`plugin/${props.pluginId}/result`)
+    if (resp.data) {
+      summary.value = resp.data
+      items.value = resp.data.items || {}
+      maxDisplay.value = resp.data.max_display || 200
+      allowDelete.value = resp.data.allow_delete || false
+    }
+  } catch (e) { console.error('获取结果失败', e) }
+}
+
+async function startScan() {
+  scanning.value = true
+  try {
+    await props.api.get(`plugin/${props.pluginId}/scan`)
+    await fetchResult()
+  } catch (e) { console.error('扫描失败', e) }
+  finally { scanning.value = false }
+}
+
+async function cancelScan() {
+  try { await props.api.get(`plugin/${props.pluginId}/cancel`) } catch (e) { console.error('取消失败', e) }
+}
+
+async function deleteItem(path, category) {
+  if (!confirm(`确认删除？\n${path}`)) return
+  try {
+    await props.api.post(`plugin/${props.pluginId}/delete_item`, { path, category })
+    await fetchResult()
+  } catch (e) { alert('删除失败') }
+}
+
+function getItems(catId) { return (items.value[catId] || []).slice(0, maxDisplay.value) }
+function getCategorySize(catId) { return (items.value[catId] || []).reduce((s, it) => s + (it.size || 0), 0) }
+function formatSize(n) {
+  if (!n) return '0 B'
+  const u = ['B', 'KB', 'MB', 'GB', 'TB']
+  let i = 0, s = n
+  while (Math.abs(s) >= 1024 && i < u.length - 1) { s /= 1024; i++ }
+  return s.toFixed(1) + ' ' + u[i]
+}
+function getSafetyColor(s) { return { safe: 'success', warn: 'warning', danger: 'error' }[s] || 'grey' }
+function getSafetyType(s) { return { safe: 'success', warn: 'warning', danger: 'error' }[s] || 'info' }
 </script>
