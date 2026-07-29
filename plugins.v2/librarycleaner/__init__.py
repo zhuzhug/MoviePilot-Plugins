@@ -105,7 +105,7 @@ class LibraryCleaner(_PluginBase):
     plugin_name = "媒体库清理"
     plugin_desc = "扫描媒体库残留与源数据残留：悬空软链、孤儿元数据、空目录、重复资源、已入库源文件、孤立源文件、源文件重复；支持全链路清理与保护目录机制。"
     plugin_icon = "clean.png"
-    plugin_version = "0.5.5"
+    plugin_version = "0.5.6"
     plugin_label = "媒体库"
     plugin_author = "zhuzhug"
     author_url = "https://github.com/zhuzhug"
@@ -268,14 +268,13 @@ class LibraryCleaner(_PluginBase):
     # ---------------------------------------------------------------- API 端点
 
     def refresh_api(self) -> Dict[str, Any]:
-        """立即扫描一次媒体库，后台异步执行。"""
+        """立即扫描一次媒体库，同步执行完成后返回结果。"""
         if not self._enabled:
             return {"code": 1, "message": "插件未启用"}
         if self._scanning:
             return {"code": 0, "message": "已有扫描任务在执行"}
-        # 后台线程启动扫描，API 立即返回
-        threading.Thread(target=self._run_scan, daemon=True).start()
-        return {"code": 0, "message": "扫描已启动，完成后请刷新页面查看结果"}
+        summary = self._run_scan()
+        return {"code": 0, "message": "扫描完成", "data": summary}
 
     def cancel_scan_api(self) -> Dict[str, Any]:
         """取消正在执行的扫描。"""
@@ -2066,8 +2065,33 @@ class LibraryCleaner(_PluginBase):
         return page
 
     def get_dashboard_meta(self) -> Optional[List[Dict[str, Any]]]:
-        """暂不注册 Dashboard 组件。"""
-        return None
+        """注册 Dashboard 组件，自动刷新显示扫描摘要。"""
+        if not self._enabled:
+            return None
+        return [{"key": "summary", "name": "媒体库清理"}]
+
+    def get_dashboard(self, key: str, **kwargs):
+        """返回 Dashboard 摘要小部件，每 60 秒自动刷新。"""
+        if not self.get_state():
+            return None
+        result = self._scan_result or self._empty_result()
+        summary = self._summary_of(result)
+        total = summary.get("total", 0)
+        total_size = self._fmt_size(summary.get("total_size", 0))
+        scan_dirs = summary.get("scan_dirs", [])
+        subtitle = f"共 {total} 项 · {total_size}"
+        if scan_dirs:
+            subtitle += f" · {scan_dirs[0]}"
+        return (
+            {"cols": 12, "sm": 6, "md": 4},
+            {
+                "title": "媒体库清理",
+                "subtitle": subtitle,
+                "refresh": 60,
+                "border": True,
+            },
+            None,
+        )
 
     def get_render_mode(self) -> Tuple[str, Optional[str]]:
         """使用 Vuetify JSON 渲染（get_page 返回的是 VuetifyJSON，不是 Vue 联邦组件）。"""
