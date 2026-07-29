@@ -114,7 +114,7 @@ const categories = [
 ]
 
 function unwrap(r) {
-  if (r && r.data !== undefined && r.success !== undefined) return r.data
+  if (r && r.data !== undefined && (r.success !== undefined || r.code !== undefined)) return r.data
   return r?.data ?? r
 }
 
