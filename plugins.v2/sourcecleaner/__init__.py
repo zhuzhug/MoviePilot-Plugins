@@ -8,6 +8,7 @@ import time
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from fastapi import Body
 import pytz
 from pydantic import BaseModel, Field
 
@@ -159,9 +160,20 @@ class SourceCleaner(_PluginBase):
             {"path": "/cancel", "endpoint": self.cancel_scan_api, "methods": ["GET"], "auth": "bear", "summary": "取消扫描"},
             {"path": "/status", "endpoint": self.status_api, "methods": ["GET"], "auth": "bear", "summary": "扫描状态"},
             {"path": "/result", "endpoint": self.result_api, "methods": ["GET"], "auth": "bear", "summary": "扫描结果"},
+            {"path": "/config", "endpoint": self.save_config_api, "methods": ["POST"], "auth": "bear", "summary": "保存配置"},
             {"path": "/delete_item", "endpoint": self.delete_item_api, "methods": ["POST"], "auth": "bear", "summary": "删除单条"},
             {"path": "/delete_batch", "endpoint": self.delete_batch_api, "methods": ["POST"], "auth": "bear", "summary": "批量删除"},
         ]
+
+    def save_config_api(self, config: Dict[str, Any] = Body(default=None)) -> Dict[str, Any]:
+        """保存插件配置。"""
+        try:
+            if config:
+                self.update_config(config)
+                self.init_plugin(config)
+            return {"code": 0, "message": "配置已保存"}
+        except Exception as err:
+            return {"code": 1, "message": f"保存失败：{err}"}
 
     def get_sidebar_nav(self) -> List[Dict[str, Any]]:
         if not self.get_state():
