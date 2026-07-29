@@ -105,7 +105,7 @@ class LibraryCleaner(_PluginBase):
     plugin_name = "媒体库清理"
     plugin_desc = "扫描媒体库残留与源数据残留：悬空软链、孤儿元数据、空目录、重复资源、已入库源文件、孤立源文件、源文件重复；支持全链路清理与保护目录机制。"
     plugin_icon = "clean.png"
-    plugin_version = "0.5.6"
+    plugin_version = "0.5.7"
     plugin_label = "媒体库"
     plugin_author = "zhuzhug"
     author_url = "https://github.com/zhuzhug"
@@ -200,6 +200,13 @@ class LibraryCleaner(_PluginBase):
                 "methods": ["GET"],
                 "auth": "bear",
                 "summary": "立即扫描媒体库",
+            },
+            {
+                "path": "/scan",
+                "endpoint": self.refresh_api,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "立即扫描媒体库（兼容前端）",
             },
             {
                 "path": "/cancel",
