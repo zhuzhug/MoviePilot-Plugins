@@ -71,7 +71,7 @@ class SourceCleaner(_PluginBase):
     plugin_name = "源文件清理"
     plugin_desc = "扫描下载目录残留：悬空软链、孤儿元数据、空目录、重复资源，支持单条/批量删除并级联清理。"
     plugin_icon = "media-cleanup.png"
-    plugin_version = "2.0.3"
+    plugin_version = "2.0.4"
     plugin_label = "下载器"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "sourcecleaner_"
@@ -269,8 +269,8 @@ class SourceCleaner(_PluginBase):
             {"component": "VChip", "props": {"color": "info", "variant": "tonal", "size": "small", "class": "mr-2"}, "text": f"共 {total} 项"},
         ]
 
-        # 扫描按钮
-        scan_btn = {"component": "VBtn", "props": {"color": "primary", "variant": "flat", "prependIcon": "mdi-refresh", "events": {"click": {"api": scan_url, "method": "get"}}}, "text": "立即扫描"}
+        # 扫描按钮：先执行扫描，然后刷新页面
+        scan_btn = {"component": "VBtn", "props": {"color": "primary", "variant": "flat", "prependIcon": "mdi-refresh", "events": {"click": {"api": scan_url, "method": "get", "refresh": True}}}, "text": "立即扫描"}
 
         header = {"component": "VCard", "props": {"variant": "outlined", "class": "mb-3"}, "content": [{"component": "VCardText", "content": [{"component": "div", "props": {"class": "d-flex flex-wrap align-center"}, "content": status_chips + [{"component": "div", "props": {"class": "ml-auto"}, "content": [scan_btn]}]}]}]}
 
