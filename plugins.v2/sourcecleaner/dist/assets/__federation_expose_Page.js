@@ -1,21 +1,19 @@
 import { importShared } from './__federation_fn_import.js';
-import AppPage from './__federation_expose_AppPage.js';
-import { _ as _export_sfc } from './_plugin-vue_export-helper.js';
+import _sfc_main$1 from './__federation_expose_AppPage.js';
+
+const {createVNode:_createVNode,resolveComponent:_resolveComponent,withCtx:_withCtx,openBlock:_openBlock,createBlock:_createBlock} = await importShared('vue');
 
 const _sfc_main = {
-  name: 'Page',
-  components: { AppPage },
+  __name: 'Page',
   props: {
-    api: { type: Object, required: true },
-    pluginId: { type: String, required: true },
-  },
-};
-
-const {resolveComponent:_resolveComponent,createVNode:_createVNode,withCtx:_withCtx,openBlock:_openBlock,createBlock:_createBlock} = await importShared('vue');
+  api: { type: Object, required: true },
+  pluginId: { type: String, required: true },
+},
+  setup(__props) {
 
 
-function _sfc_render(_ctx, _cache, $props, $setup, $data, $options) {
-  const _component_AppPage = _resolveComponent("AppPage");
+
+return (_ctx, _cache) => {
   const _component_v_card_text = _resolveComponent("v-card-text");
   const _component_v_card = _resolveComponent("v-card");
 
@@ -23,9 +21,9 @@ function _sfc_render(_ctx, _cache, $props, $setup, $data, $options) {
     default: _withCtx(() => [
       _createVNode(_component_v_card_text, null, {
         default: _withCtx(() => [
-          _createVNode(_component_AppPage, {
-            api: $props.api,
-            pluginId: $props.pluginId
+          _createVNode(_sfc_main$1, {
+            api: __props.api,
+            pluginId: __props.pluginId
           }, null, 8, ["api", "pluginId"])
         ]),
         _: 1
@@ -34,6 +32,8 @@ function _sfc_render(_ctx, _cache, $props, $setup, $data, $options) {
     _: 1
   }))
 }
-const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['render',_sfc_render]]);
+}
 
-export { Page as default };
+};
+
+export { _sfc_main as default };
