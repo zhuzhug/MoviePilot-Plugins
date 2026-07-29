@@ -15,19 +15,50 @@ export default defineConfig({
         './AppPage': './src/components/AppPage.vue',
       },
       shared: {
-        vue: { requiredVersion: false, generate: false },
-        vuetify: { requiredVersion: false, generate: false, singleton: true },
-        'vuetify/styles': { requiredVersion: false, generate: false, singleton: true },
+        vue: {
+          requiredVersion: false,
+          generate: false,
+        },
       },
       format: 'esm',
     }),
   ],
   build: {
     target: 'esnext',
+    minify: false,
     cssCodeSplit: true,
-    outDir: 'dist/assets',
     rollupOptions: {
-      external: ['vue', 'vuetify'],
+      output: {
+        entryFileNames: 'assets/[name].js',
+        chunkFileNames: 'assets/[name].js',
+        assetFileNames: 'assets/[name][extname]',
+      },
+    },
+  },
+  css: {
+    postcss: {
+      plugins: [
+        {
+          postcssPlugin: 'internal:charset-removal',
+          AtRule: {
+            charset: atRule => {
+              if (atRule.name === 'charset') {
+                atRule.remove()
+              }
+            },
+          },
+        },
+        {
+          postcssPlugin: 'vuetify-filter',
+          Root(root) {
+            root.walkRules(rule => {
+              if (rule.selector && (rule.selector.includes('.v-') || rule.selector.includes('.mdi-'))) {
+                rule.remove()
+              }
+            })
+          },
+        },
+      ],
     },
   },
 })
