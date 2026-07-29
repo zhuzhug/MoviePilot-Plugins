@@ -1,30 +1,4 @@
 import { importShared } from './__federation_fn_import.js';
-import { _ as _export_sfc } from './_plugin-vue_export-helper.js';
-
-const _sfc_main = {
-  name: 'Dashboard',
-  props: {
-    config: { type: Object, default: () => ({}) },
-    allowRefresh: { type: Boolean, default: false },
-  },
-  data: () => ({ summary: null }),
-  mounted() { this.fetch(); },
-  methods: {
-    async fetch() {
-      try {
-        const resp = await this.$root.$api?.get('plugin/LibraryCleaner/result');
-        if (resp?.data) this.summary = resp.data;
-      } catch (e) { /* ignore */ }
-    },
-    formatSize(n) {
-      if (!n) return '0 B';
-      const u = ['B','KB','MB','GB','TB'];
-      let i = 0, s = n;
-      while (Math.abs(s) >= 1024 && i < u.length-1) { s /= 1024; i++; }
-      return s.toFixed(1) + ' ' + u[i];
-    },
-  },
-};
 
 const {createTextVNode:_createTextVNode,resolveComponent:_resolveComponent,withCtx:_withCtx,createVNode:_createVNode,toDisplayString:_toDisplayString,openBlock:_openBlock,createElementBlock:_createElementBlock,createCommentVNode:_createCommentVNode,createBlock:_createBlock} = await importShared('vue');
 
@@ -42,7 +16,37 @@ const _hoisted_3 = {
   class: "text-caption text-grey"
 };
 
-function _sfc_render(_ctx, _cache, $props, $setup, $data, $options) {
+const {ref,onMounted} = await importShared('vue');
+
+
+
+const _sfc_main = {
+  __name: 'Dashboard',
+  props: {
+  config: { type: Object, default: () => ({}) },
+  allowRefresh: { type: Boolean, default: false },
+},
+  setup(__props) {
+
+const summary = ref(null);
+
+onMounted(async () => {
+  try {
+    const resp = await fetch('/api/v1/plugin/SourceCleaner/result?token=' + (window.__token || ''));
+    const data = await resp.json();
+    if (data.data) summary.value = data.data;
+  } catch (e) { /* ignore */ }
+});
+
+function formatSize(n) {
+  if (!n) return '0 B'
+  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0, s = n;
+  while (Math.abs(s) >= 1024 && i < u.length - 1) { s /= 1024; i++; }
+  return s.toFixed(1) + ' ' + u[i]
+}
+
+return (_ctx, _cache) => {
   const _component_v_card_title = _resolveComponent("v-card-title");
   const _component_v_card_text = _resolveComponent("v-card-text");
   const _component_v_card = _resolveComponent("v-card");
@@ -57,11 +61,11 @@ function _sfc_render(_ctx, _cache, $props, $setup, $data, $options) {
       }),
       _createVNode(_component_v_card_text, { class: "text-center py-4" }, {
         default: _withCtx(() => [
-          (_ctx.summary)
-            ? (_openBlock(), _createElementBlock("div", _hoisted_1, _toDisplayString(_ctx.summary.total), 1))
+          (summary.value)
+            ? (_openBlock(), _createElementBlock("div", _hoisted_1, _toDisplayString(summary.value.total), 1))
             : _createCommentVNode("", true),
-          (_ctx.summary)
-            ? (_openBlock(), _createElementBlock("div", _hoisted_2, "项残留 · " + _toDisplayString($options.formatSize(_ctx.summary.total_size)), 1))
+          (summary.value)
+            ? (_openBlock(), _createElementBlock("div", _hoisted_2, "项残留 · " + _toDisplayString(formatSize(summary.value.total_size)), 1))
             : (_openBlock(), _createElementBlock("div", _hoisted_3, "暂无数据"))
         ]),
         _: 1
@@ -70,6 +74,8 @@ function _sfc_render(_ctx, _cache, $props, $setup, $data, $options) {
     _: 1
   }))
 }
-const Dashboard = /*#__PURE__*/_export_sfc(_sfc_main, [['render',_sfc_render]]);
+}
 
-export { Dashboard as default };
+};
+
+export { _sfc_main as default };
