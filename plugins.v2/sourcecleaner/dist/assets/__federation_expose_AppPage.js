@@ -16,7 +16,6 @@ const _sfc_main = {
   props: {
   api: { type: Object, required: true },
   pluginId: { type: String, required: true },
-  navKey: { type: String, default: 'main' },
 },
   setup(__props) {
 
@@ -25,42 +24,52 @@ const props = __props;
 const scanning = ref(false);
 const summary = ref(null);
 const items = ref({});
-const expandedPanels = ref([]);
-const maxDisplay = ref(200);
+const expanded = ref([]);
 const allowDelete = ref(false);
+const maxDisplay = ref(200);
 
 const categories = [
-  { id: 'dangling', title: '悬空软链', icon: 'mdi-link-variant-off', safety: 'safe', safetyLabel: '安全可删', safetyDesc: '软链目标已不存在' },
-  { id: 'orphan_meta', title: '孤儿元数据', icon: 'mdi-file-document-outline', safety: 'safe', safetyLabel: '安全可删', safetyDesc: '无对应视频' },
-  { id: 'empty_dir', title: '空目录', icon: 'mdi-folder-open-outline', safety: 'safe', safetyLabel: '安全可删', safetyDesc: '空目录' },
-  { id: 'dup_resource', title: '重复资源', icon: 'mdi-content-duplicate', safety: 'warn', safetyLabel: '需确认', safetyDesc: '同片不同版本' },
-  { id: 'source_transferred', title: '已入库源文件', icon: 'mdi-file-check', safety: 'danger', safetyLabel: '谨慎', safetyDesc: '已整理到库的文件' },
-  { id: 'source_orphan', title: '孤立源文件', icon: 'mdi-file-question', safety: 'danger', safetyLabel: '谨慎', safetyDesc: '无下载器跟踪' },
-  { id: 'source_torrent', title: '无效种子文件', icon: 'mdi-file-remove-outline', safety: 'warn', safetyLabel: '需确认', safetyDesc: '.torrent 残留' },
-  { id: 'source_empty_dir', title: '源目录空目录', icon: 'mdi-folder-open-outline', safety: 'safe', safetyLabel: '安全可删', safetyDesc: '源数据空目录' },
-  { id: 'source_dup', title: '源文件重复', icon: 'mdi-file-multiple', safety: 'warn', safetyLabel: '需确认', safetyDesc: '下载目录重复文件' },
+  { id: 'dangling', title: '悬空软链', icon: 'mdi-link-variant-off', s: 'success', sl: '安全可删', sd: '目标已不存在' },
+  { id: 'orphan_meta', title: '孤儿元数据', icon: 'mdi-file-document-outline', s: 'success', sl: '安全可删', sd: '无对应视频' },
+  { id: 'empty_dir', title: '空目录', icon: 'mdi-folder-open-outline', s: 'success', sl: '安全可删', sd: '空目录' },
+  { id: 'dup_resource', title: '重复资源', icon: 'mdi-content-duplicate', s: 'warning', sl: '需确认', sd: '同片不同版本' },
+  { id: 'source_transferred', title: '已入库源文件', icon: 'mdi-file-check', s: 'error', sl: '谨慎', sd: '已整理到库' },
+  { id: 'source_orphan', title: '孤立源文件', icon: 'mdi-file-question', s: 'error', sl: '谨慎', sd: '无下载器跟踪' },
+  { id: 'source_torrent', title: '无效种子文件', icon: 'mdi-file-remove-outline', s: 'warning', sl: '需确认', sd: '.torrent 残留' },
+  { id: 'source_empty_dir', title: '源目录空目录', icon: 'mdi-folder-open-outline', s: 'success', sl: '安全可删', sd: '源数据空目录' },
+  { id: 'source_dup', title: '源文件重复', icon: 'mdi-file-multiple', s: 'warning', sl: '需确认', sd: '下载目录重复' },
 ];
 
-onMounted(() => { fetchResult(); });
+function unwrap(r) {
+  if (r && r.data !== undefined && r.success !== undefined) return r.data
+  return r?.data ?? r
+}
+
+onMounted(() => fetchResult());
 
 async function fetchResult() {
   try {
     const resp = await props.api.get(`plugin/${props.pluginId}/result`);
-    if (resp.data) {
-      summary.value = resp.data;
-      items.value = resp.data.items || {};
-      maxDisplay.value = resp.data.max_display || 200;
-      allowDelete.value = resp.data.allow_delete || false;
+    const d = unwrap(resp);
+    if (d) {
+      summary.value = d;
+      items.value = d.items || {};
+      maxDisplay.value = d.max_display || 200;
+      allowDelete.value = d.allow_delete || false;
     }
-  } catch (e) { console.error('获取结果失败', e); }
+  } catch (e) { console.error('fetchResult error:', e); }
 }
 
 async function startScan() {
   scanning.value = true;
   try {
-    await props.api.get(`plugin/${props.pluginId}/scan`);
-    await fetchResult();
-  } catch (e) { console.error('扫描失败', e); }
+    const resp = await props.api.get(`plugin/${props.pluginId}/scan`);
+    const d = unwrap(resp);
+    if (d) {
+      summary.value = d;
+      items.value = d.items || {};
+    }
+  } catch (e) { console.error('scan error:', e); }
   finally { scanning.value = false; }
 }
 
@@ -68,7 +77,7 @@ async function cancelScan() {
   try { await props.api.get(`plugin/${props.pluginId}/cancel`); } catch (e) {}
 }
 
-async function deleteItem(path, category) {
+async function delItem(path, category) {
   if (!confirm(`确认删除？\n${path}`)) return
   try {
     await props.api.post(`plugin/${props.pluginId}/delete_item`, { path, category });
@@ -76,17 +85,16 @@ async function deleteItem(path, category) {
   } catch (e) { alert('删除失败'); }
 }
 
-function getItems(catId) { return (items.value[catId] || []).slice(0, maxDisplay.value) }
-function getCategorySize(catId) { return (items.value[catId] || []).reduce((s, it) => s + (it.size || 0), 0) }
-function formatSize(n) {
+function catItems(id) { return (items.value[id] || []).slice(0, maxDisplay.value) }
+function catSize(id) { return (items.value[id] || []).reduce((s, it) => s + (it.size || 0), 0) }
+function fmtSize(n) {
   if (!n) return '0 B'
   const u = ['B', 'KB', 'MB', 'GB', 'TB'];
   let i = 0, s = n;
   while (Math.abs(s) >= 1024 && i < u.length - 1) { s /= 1024; i++; }
   return s.toFixed(1) + ' ' + u[i]
 }
-function getSafetyColor(s) { return { safe: 'success', warn: 'warning', danger: 'error' }[s] || 'grey' }
-function getSafetyType(s) { return { safe: 'success', warn: 'warning', danger: 'error' }[s] || 'info' }
+function sColor(s) { return { success: 'success', warning: 'warning', error: 'error' }[s] || 'grey' }
 
 return (_ctx, _cache) => {
   const _component_v_app_bar_title = _resolveComponent("v-app-bar-title");
@@ -133,7 +141,7 @@ return (_ctx, _cache) => {
                   _createVNode(_component_v_progress_circular, {
                     indeterminate: "",
                     size: "16",
-                    width: "2",
+                    width: "1",
                     class: "mr-1"
                   }),
                   _cache[2] || (_cache[2] = _createTextVNode(" 扫描中... ", -1))
@@ -149,7 +157,7 @@ return (_ctx, _cache) => {
                   class: "mr-2"
                 }, {
                   default: _withCtx(() => [
-                    _createTextVNode(" 共 " + _toDisplayString(summary.value.total) + " 项 · " + _toDisplayString(formatSize(summary.value.total_size)), 1)
+                    _createTextVNode(" 共 " + _toDisplayString(summary.value.total) + " 项 · " + _toDisplayString(fmtSize(summary.value.total_size)), 1)
                   ]),
                   _: 1
                 }))
@@ -163,7 +171,10 @@ return (_ctx, _cache) => {
                 onClick: cancelScan
               }, {
                 default: _withCtx(() => [
-                  _createVNode(_component_v_icon, { start: "" }, {
+                  _createVNode(_component_v_icon, {
+                    start: "",
+                    size: "small"
+                  }, {
                     default: _withCtx(() => [...(_cache[3] || (_cache[3] = [
                       _createTextVNode("mdi-close-circle", -1)
                     ]))]),
@@ -178,11 +189,13 @@ return (_ctx, _cache) => {
                 color: "primary",
                 variant: "flat",
                 size: "small",
-                onClick: startScan,
-                loading: scanning.value
+                onClick: startScan
               }, {
                 default: _withCtx(() => [
-                  _createVNode(_component_v_icon, { start: "" }, {
+                  _createVNode(_component_v_icon, {
+                    start: "",
+                    size: "small"
+                  }, {
                     default: _withCtx(() => [...(_cache[5] || (_cache[5] = [
                       _createTextVNode("mdi-refresh", -1)
                     ]))]),
@@ -191,7 +204,7 @@ return (_ctx, _cache) => {
                   _cache[6] || (_cache[6] = _createTextVNode("扫描 ", -1))
                 ]),
                 _: 1
-              }, 8, ["loading"]))
+              }))
         ]),
         default: _withCtx(() => [
           _createVNode(_component_v_app_bar_title, null, {
@@ -223,7 +236,7 @@ return (_ctx, _cache) => {
                             class: "mb-4"
                           }),
                           _cache[7] || (_cache[7] = _createElementVNode("div", { class: "text-h6 mb-2" }, "正在扫描文件系统...", -1)),
-                          _cache[8] || (_cache[8] = _createElementVNode("div", { class: "text-caption text-medium-emphasis" }, "扫描过程中请勿关闭页面", -1)),
+                          _cache[8] || (_cache[8] = _createElementVNode("div", { class: "text-caption text-medium-emphasis" }, "请稍候", -1)),
                           _createVNode(_component_v_progress_linear, {
                             indeterminate: "",
                             color: "primary",
@@ -248,15 +261,15 @@ return (_ctx, _cache) => {
                               default: _withCtx(() => [
                                 _createVNode(_component_v_card, {
                                   variant: "outlined",
-                                  color: getSafetyColor(cat.safety),
+                                  color: sColor(cat.s),
                                   class: "cursor-pointer",
-                                  onClick: $event => (expandedPanels.value = [cat.id])
+                                  onClick: $event => (expanded.value = [cat.id])
                                 }, {
                                   default: _withCtx(() => [
                                     _createVNode(_component_v_card_text, { class: "text-center py-3" }, {
                                       default: _withCtx(() => [
                                         _createVNode(_component_v_icon, {
-                                          color: getSafetyColor(cat.safety),
+                                          color: sColor(cat.s),
                                           size: "28",
                                           class: "mb-1"
                                         }, {
@@ -267,7 +280,7 @@ return (_ctx, _cache) => {
                                         }, 1032, ["color"]),
                                         _createElementVNode("div", _hoisted_1, _toDisplayString(cat.title), 1),
                                         _createVNode(_component_v_chip, {
-                                          color: getSafetyColor(cat.safety),
+                                          color: sColor(cat.s),
                                           variant: "flat",
                                           size: "small",
                                           class: "mt-1"
@@ -291,8 +304,8 @@ return (_ctx, _cache) => {
                         _: 1
                       }),
                       _createVNode(_component_v_expansion_panels, {
-                        modelValue: expandedPanels.value,
-                        "onUpdate:modelValue": _cache[0] || (_cache[0] = $event => ((expandedPanels).value = $event))
+                        modelValue: expanded.value,
+                        "onUpdate:modelValue": _cache[0] || (_cache[0] = $event => ((expanded).value = $event))
                       }, {
                         default: _withCtx(() => [
                           (_openBlock(), _createElementBlock(_Fragment, null, _renderList(categories, (cat) => {
@@ -304,7 +317,7 @@ return (_ctx, _cache) => {
                                 _createVNode(_component_v_expansion_panel_title, null, {
                                   default: _withCtx(() => [
                                     _createVNode(_component_v_icon, {
-                                      color: getSafetyColor(cat.safety),
+                                      color: sColor(cat.s),
                                       class: "mr-2"
                                     }, {
                                       default: _withCtx(() => [
@@ -315,13 +328,13 @@ return (_ctx, _cache) => {
                                     _createTextVNode(" " + _toDisplayString(cat.title) + " ", 1),
                                     _createVNode(_component_v_spacer),
                                     _createVNode(_component_v_chip, {
-                                      color: getSafetyColor(cat.safety),
+                                      color: sColor(cat.s),
                                       variant: "tonal",
                                       size: "x-small",
                                       class: "mr-2"
                                     }, {
                                       default: _withCtx(() => [
-                                        _createTextVNode(_toDisplayString(cat.safetyLabel), 1)
+                                        _createTextVNode(_toDisplayString(cat.sl), 1)
                                       ]),
                                       _: 2
                                     }, 1032, ["color"]),
@@ -331,7 +344,7 @@ return (_ctx, _cache) => {
                                       size: "small"
                                     }, {
                                       default: _withCtx(() => [
-                                        _createTextVNode(_toDisplayString(summary.value.counts[cat.id] || 0) + " · " + _toDisplayString(formatSize(getCategorySize(cat.id))), 1)
+                                        _createTextVNode(_toDisplayString(summary.value.counts[cat.id] || 0) + " · " + _toDisplayString(fmtSize(catSize(cat.id))), 1)
                                       ]),
                                       _: 2
                                     }, 1024)
@@ -341,14 +354,14 @@ return (_ctx, _cache) => {
                                 _createVNode(_component_v_expansion_panel_text, null, {
                                   default: _withCtx(() => [
                                     _createVNode(_component_v_alert, {
-                                      type: getSafetyType(cat.safety),
+                                      type: sColor(cat.s),
                                       variant: "tonal",
                                       density: "compact",
                                       class: "mb-3"
                                     }, {
                                       default: _withCtx(() => [
-                                        _createElementVNode("strong", null, _toDisplayString(cat.safetyLabel), 1),
-                                        _createTextVNode("：" + _toDisplayString(cat.safetyDesc), 1)
+                                        _createElementVNode("strong", null, _toDisplayString(cat.sl), 1),
+                                        _createTextVNode("：" + _toDisplayString(cat.sd), 1)
                                       ]),
                                       _: 2
                                     }, 1032, ["type"]),
@@ -357,22 +370,22 @@ return (_ctx, _cache) => {
                                       lines: "two"
                                     }, {
                                       default: _withCtx(() => [
-                                        (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(getItems(cat.id), (item, idx) => {
-                                          return (_openBlock(), _createBlock(_component_v_list_item, { key: idx }, _createSlots({
+                                        (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(catItems(cat.id), (it, i) => {
+                                          return (_openBlock(), _createBlock(_component_v_list_item, { key: i }, _createSlots({
                                             default: _withCtx(() => [
-                                              _createVNode(_component_v_list_item_title, { style: {"word-break":"break-all","font-family":"monospace","font-size":"0.875rem"} }, {
+                                              _createVNode(_component_v_list_item_title, { style: {"word-break":"break-all","font-family":"monospace","font-size":".875rem"} }, {
                                                 default: _withCtx(() => [
-                                                  _createTextVNode(_toDisplayString(item.path), 1)
+                                                  _createTextVNode(_toDisplayString(it.path), 1)
                                                 ]),
                                                 _: 2
                                               }, 1024),
                                               _createVNode(_component_v_list_item_subtitle, null, {
                                                 default: _withCtx(() => [
-                                                  (item.size)
-                                                    ? (_openBlock(), _createElementBlock("span", _hoisted_2, "大小: " + _toDisplayString(formatSize(item.size)), 1))
+                                                  (it.size)
+                                                    ? (_openBlock(), _createElementBlock("span", _hoisted_2, _toDisplayString(fmtSize(it.size)), 1))
                                                     : _createCommentVNode("", true),
-                                                  (item.target)
-                                                    ? (_openBlock(), _createElementBlock("span", _hoisted_3, " · " + _toDisplayString(item.target), 1))
+                                                  (it.target)
+                                                    ? (_openBlock(), _createElementBlock("span", _hoisted_3, " · " + _toDisplayString(it.target), 1))
                                                     : _createCommentVNode("", true)
                                                 ]),
                                                 _: 2
@@ -389,7 +402,7 @@ return (_ctx, _cache) => {
                                                       color: "error",
                                                       variant: "text",
                                                       size: "small",
-                                                      onClick: $event => (deleteItem(item.path, cat.id))
+                                                      onClick: $event => (delItem(it.path, cat.id))
                                                     }, null, 8, ["onClick"])
                                                   ]),
                                                   key: "0"
@@ -409,7 +422,7 @@ return (_ctx, _cache) => {
                                           class: "mt-2"
                                         }, {
                                           default: _withCtx(() => [...(_cache[9] || (_cache[9] = [
-                                            _createTextVNode(" 已达到展示上限 ", -1)
+                                            _createTextVNode("已达到展示上限", -1)
                                           ]))]),
                                           _: 1
                                         }))
@@ -443,7 +456,7 @@ return (_ctx, _cache) => {
                               _: 1
                             }),
                             _cache[11] || (_cache[11] = _createElementVNode("div", { class: "text-h6 text-grey" }, "暂无扫描结果", -1)),
-                            _cache[12] || (_cache[12] = _createElementVNode("div", { class: "text-caption text-medium-emphasis mt-2" }, "点击右上角\"扫描\"按钮开始检测", -1))
+                            _cache[12] || (_cache[12] = _createElementVNode("div", { class: "text-caption text-medium-emphasis mt-2" }, "点击右上角\"扫描\"按钮开始", -1))
                           ]),
                           _: 1
                         })
