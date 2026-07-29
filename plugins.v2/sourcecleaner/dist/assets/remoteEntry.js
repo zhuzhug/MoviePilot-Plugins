@@ -1,1 +1,90 @@
-const v={},l=new Set(["Module","__esModule","default","_export_sfc"]);let y={"./Page":()=>(c([],!1,"./Page"),f("./__federation_expose_Page-C3aFhjG3.js").then(e=>Object.keys(e).every(s=>l.has(s))?()=>e.default:()=>e)),"./Config":()=>(c([],!1,"./Config"),f("./__federation_expose_Config-Dx1-EUom.js").then(e=>Object.keys(e).every(s=>l.has(s))?()=>e.default:()=>e)),"./Dashboard":()=>(c([],!1,"./Dashboard"),f("./__federation_expose_Dashboard-CoqXVr_0.js").then(e=>Object.keys(e).every(s=>l.has(s))?()=>e.default:()=>e)),"./AppPage":()=>(c([],!1,"./AppPage"),f("./__federation_expose_AppPage-t92x6yZy.js").then(e=>Object.keys(e).every(s=>l.has(s))?()=>e.default:()=>e))};const E={},c=(e,s,p)=>{const o=import.meta.url;if(typeof o>"u"){console.warn('The remote style takes effect only when the build.target option in the vite.config.ts file is higher than that of "es2020".');return}const a=o.substring(0,o.lastIndexOf("remoteEntry.js")),_='/';'assets',e.forEach(i=>{let n="";const h=_||a;if(h){const r={trailing:t=>t.endsWith("/")?t.slice(0,-1):t,leading:t=>t.startsWith("/")?t.slice(1):t},C=t=>t.startsWith("http")||t.startsWith("//"),d=r.trailing(h),g=r.leading(i),b=r.trailing(a);C(h)?n=[d,g].filter(Boolean).join("/"):b.includes(d)?n=[b,g].filter(Boolean).join("/"):n=[b+d,g].filter(Boolean).join("/")}else n=i;if(s){const r="css__SourceCleaner__"+p;window[r]=window[r]||[],window[r].push(n);return}if(n in E)return;E[n]=!0;const u=document.createElement("link");u.rel="stylesheet",u.href=n,document.head.appendChild(u)})};async function f(e){return v[e]??=import(e),v[e]}const w=e=>{if(!y[e])throw new Error("Can not find remote module "+e);return y[e]()},j=e=>{globalThis.__federation_shared__=globalThis.__federation_shared__||{},Object.entries(e).forEach(([s,p])=>{for(const[o,a]of Object.entries(p)){const _=a.scope||"default";globalThis.__federation_shared__[_]=globalThis.__federation_shared__[_]||{};const i=globalThis.__federation_shared__[_];(i[s]=i[s]||{})[o]=a}})};export{c as dynamicLoadingCss,w as get,j as init};
+const currentImports = {};
+      const exportSet = new Set(['Module', '__esModule', 'default', '_export_sfc']);
+      let moduleMap = {
+"./Page":()=>{
+      dynamicLoadingCss([], false, './Page');
+      return __federation_import('./__federation_expose_Page.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},
+"./Config":()=>{
+      dynamicLoadingCss([], false, './Config');
+      return __federation_import('./__federation_expose_Config.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},
+"./Dashboard":()=>{
+      dynamicLoadingCss([], false, './Dashboard');
+      return __federation_import('./__federation_expose_Dashboard.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},
+"./AppPage":()=>{
+      dynamicLoadingCss([], false, './AppPage');
+      return __federation_import('./__federation_expose_AppPage.js').then(module =>Object.keys(module).every(item => exportSet.has(item)) ? () => module.default : () => module)},};
+      const seen = {};
+      const dynamicLoadingCss = (cssFilePaths, dontAppendStylesToHead, exposeItemName) => {
+        const metaUrl = import.meta.url;
+        if (typeof metaUrl === 'undefined') {
+          console.warn('The remote style takes effect only when the build.target option in the vite.config.ts file is higher than that of "es2020".');
+          return;
+        }
+
+        const curUrl = metaUrl.substring(0, metaUrl.lastIndexOf('remoteEntry.js'));
+        const base = '/';
+        'assets';
+
+        cssFilePaths.forEach(cssPath => {
+         let href = '';
+         const baseUrl = base || curUrl;
+         if (baseUrl) {
+           const trimmer = {
+             trailing: (path) => (path.endsWith('/') ? path.slice(0, -1) : path),
+             leading: (path) => (path.startsWith('/') ? path.slice(1) : path)
+           };
+           const isAbsoluteUrl = (url) => url.startsWith('http') || url.startsWith('//');
+
+           const cleanBaseUrl = trimmer.trailing(baseUrl);
+           const cleanCssPath = trimmer.leading(cssPath);
+           const cleanCurUrl = trimmer.trailing(curUrl);
+
+           if (isAbsoluteUrl(baseUrl)) {
+             href = [cleanBaseUrl, cleanCssPath].filter(Boolean).join('/');
+           } else {
+            if (cleanCurUrl.includes(cleanBaseUrl)) {
+              href = [cleanCurUrl, cleanCssPath].filter(Boolean).join('/');
+            } else {
+              href = [cleanCurUrl + cleanBaseUrl, cleanCssPath].filter(Boolean).join('/');
+            }
+           }
+         } else {
+           href = cssPath;
+         }
+         
+          if (dontAppendStylesToHead) {
+            const key = 'css__SourceCleaner__' + exposeItemName;
+            window[key] = window[key] || [];
+            window[key].push(href);
+            return;
+          }
+
+          if (href in seen) return;
+          seen[href] = true;
+
+          const element = document.createElement('link');
+          element.rel = 'stylesheet';
+          element.href = href;
+          document.head.appendChild(element);
+        });
+      };
+      async function __federation_import(name) {
+        currentImports[name] ??= import(name);
+        return currentImports[name]
+      }      const get =(module) => {
+        if(!moduleMap[module]) throw new Error('Can not find remote module ' + module)
+        return moduleMap[module]();
+      };
+      const init =(shareScope) => {
+        globalThis.__federation_shared__= globalThis.__federation_shared__|| {};
+        Object.entries(shareScope).forEach(([key, value]) => {
+          for (const [versionKey, versionValue] of Object.entries(value)) {
+            const scope = versionValue.scope || 'default';
+            globalThis.__federation_shared__[scope] = globalThis.__federation_shared__[scope] || {};
+            const shared= globalThis.__federation_shared__[scope];
+            (shared[key] = shared[key]||{})[versionKey] = versionValue;
+          }
+        });
+      };
+
+export { dynamicLoadingCss, get, init };
