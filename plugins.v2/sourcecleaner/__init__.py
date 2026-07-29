@@ -71,7 +71,7 @@ class SourceCleaner(_PluginBase):
     plugin_name = "源文件清理"
     plugin_desc = "扫描下载目录残留：悬空软链、孤儿元数据、空目录、重复资源，支持单条/批量删除并级联清理。"
     plugin_icon = "media-cleanup.png"
-    plugin_version = "2.0.1"
+    plugin_version = "2.0.2"
     plugin_label = "下载器"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "sourcecleaner_"
@@ -181,13 +181,67 @@ class SourceCleaner(_PluginBase):
         return [{"nav_key": "main", "title": "源文件清理", "icon": "mdi-broom", "section": "organize", "permission": "manage", "order": 49}]
 
     def get_render_mode(self) -> Tuple[str, str]:
-        return "vue", "dist/assets"
+        """使用 Vuetify JSON 渲染。"""
+        return "vuetify", None
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         return [], self._current_config()
 
     def get_page(self) -> List[dict]:
-        return []
+        """返回 Vuetify JSON 详情页。"""
+        if not self._enabled:
+            return [{"component": "VAlert", "props": {"type": "warning", "variant": "tonal"}, "text": "插件未启用，请在设置中开启"}]
+
+        result = self._scan_result or self._empty_result()
+        summary = self._summary_of(result)
+        counts = summary.get("counts", {})
+        total = summary.get("total", 0)
+
+        api_token = settings.API_TOKEN
+        scan_url = f"/api/v1/plugin/SourceCleaner/scan?apikey={api_token}"
+        refresh_url = f"/api/v1/plugin/SourceCleaner/result?apikey={api_token}"
+
+        # 顶部状态
+        status_chips = [
+            {"component": "VChip", "props": {"color": "primary" if self._enabled else "grey", "variant": "tonal", "size": "small", "class": "mr-2"}, "text": "已启用" if self._enabled else "未启用"},
+            {"component": "VChip", "props": {"color": "info", "variant": "tonal", "size": "small", "class": "mr-2"}, "text": f"共 {total} 项"},
+        ]
+
+        # 扫描按钮
+        scan_btn = {"component": "VBtn", "props": {"color": "primary", "variant": "flat", "prependIcon": "mdi-refresh", "events": {"click": {"api": scan_url, "method": "get"}}}, "text": "立即扫描"}
+
+        header = {"component": "VCard", "props": {"variant": "outlined", "class": "mb-3"}, "content": [{"component": "VCardText", "content": [{"component": "div", "props": {"class": "d-flex flex-wrap align-center"}, "content": status_chips + [{"component": "div", "props": {"class": "ml-auto"}, "content": [scan_btn]}]}]}]}
+
+        # 分类概览
+        summary_rows = []
+        for cat_id, cat_title, cat_icon in _ALL_CATEGORY_META:
+            c = counts.get(cat_id, 0)
+            enabled = getattr(self, f"_enable_{cat_id}", False) if not cat_id.startswith("source_") else getattr(self, f"_enable_{cat_id}", False)
+            chip_color = "success" if c == 0 else "warning" if c > 0 else "grey"
+            row = {"component": "VListItem", "props": {"density": "compact"}, "content": [{"component": "div", "props": {"class": "d-flex align-center", "style": "width: 100%"}, "content": [
+                {"component": "VIcon", "props": {"class": "mr-2", "color": "primary" if enabled else "grey"}, "text": cat_icon},
+                {"component": "div", "props": {"class": "flex-grow-1"}, "content": [{"component": "div", "props": {"class": "text-body-2"}, "text": cat_title}]},
+                {"component": "VChip", "props": {"color": chip_color, "variant": "tonal", "size": "small"}, "text": str(c)},
+            ]}]}
+            summary_rows.append(row)
+
+        summary_card = {"component": "VCard", "props": {"variant": "outlined", "class": "mb-3"}, "content": [{"component": "VCardTitle", "props": {"class": "text-subtitle-1 pa-3 pb-1"}, "text": "分类概览"}, {"component": "VList", "props": {"density": "compact", "class": "pa-0"}, "content": summary_rows}]}
+
+        # 详情列表（每个分类的条目）
+        detail_tabs = []
+        detail_windows = []
+        for cat_id, cat_title, cat_icon in _ALL_CATEGORY_META:
+            items = result["items"].get(cat_id, [])
+            detail_tabs.append({"component": "VTab", "props": {"value": cat_id}, "content": [{"component": "VIcon", "props": {"start": True}, "text": cat_icon}, {"component": "span", "text": f"{cat_title} ({len(items)})"}]})
+            if items:
+                rows = [{"component": "VListItem", "props": {"density": "compact", "lines": "two"}, "content": [{"component": "VListItemTitle", "props": {"class": "text-body-2", "style": "word-break: break-all"}, "text": it.get("path", "")}, {"component": "VListItemSubtitle", "props": {"class": "text-caption"}, "text": it.get("target", "")}]} for it in items[:self._max_display_per_type]]
+                detail_windows.append({"component": "VWindowItem", "props": {"value": cat_id}, "content": [{"component": "VCard", "props": {"variant": "flat"}, "content": [{"component": "VList", "props": {"density": "compact", "lines": "two", "class": "pa-0"}, "content": rows}]}]})
+            else:
+                detail_windows.append({"component": "VWindowItem", "props": {"value": cat_id}, "content": [{"component": "VAlert", "props": {"type": "success", "variant": "tonal"}, "text": f"未发现「{cat_title}」类残留"}]})
+
+        tabs_card = {"component": "VCard", "props": {"variant": "outlined"}, "content": [{"component": "VTabs", "props": {"model": "active_tab", "grow": True, "showArrows": True}, "content": detail_tabs}, {"component": "VDivider"}, {"component": "VWindow", "props": {"model": "active_tab"}, "content": detail_windows}]}
+
+        return [header, summary_card, tabs_card]
 
     def get_dashboard_meta(self) -> Optional[List[Dict[str, Any]]]:
         if not self.get_state():
