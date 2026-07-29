@@ -6,14 +6,10 @@
   </v-card>
 </template>
 
-<script>
-import AppPage from './AppPage.vue';
-export default {
-  name: 'Page',
-  components: { AppPage },
-  props: {
-    api: { type: Object, required: true },
-    pluginId: { type: String, required: true },
-  },
-};
+<script setup>
+import AppPage from './AppPage.vue'
+defineProps({
+  api: { type: Object, required: true },
+  pluginId: { type: String, required: true },
+})
 </script>
