@@ -4,10 +4,9 @@ on:
   push:
     branches: [main]
     paths:
-      - 'plugins.v2/sourcecleaner/src/**'
-      - 'plugins.v2/sourcecleaner/vite.config.js'
-      - 'plugins.v2/sourcecleaner/package.json'
-  workflow_dispatch:
+      - 'plugins.v2/librarycleaner/src/**'
+      - 'plugins.v2/librarycleaner/vite.config.js'
+      - 'plugins.v2/librarycleaner/package.json'
 
 jobs:
   build:
@@ -20,20 +19,20 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
-          cache-dependency-path: 'plugins.v2/sourcecleaner/package-lock.json'
+          cache-dependency-path: 'plugins.v2/librarycleaner/package-lock.json'
       
       - name: Install dependencies
-        working-directory: plugins.v2/sourcecleaner
+        working-directory: plugins.v2/librarycleaner
         run: npm install
       
       - name: Build
-        working-directory: plugins.v2/sourcecleaner
+        working-directory: plugins.v2/librarycleaner
         run: npm run build
       
       - name: Commit built assets
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add plugins.v2/sourcecleaner/dist/
+          git add plugins.v2/librarycleaner/dist/
           git diff --staged --quiet || git commit -m "build: auto-compile Vue frontend [skip ci]"
           git push
