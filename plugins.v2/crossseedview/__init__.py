@@ -77,7 +77,7 @@ class CrossSeedView(_PluginBase):
     plugin_name = "辅种查看"
     plugin_desc = "扫描所有下载器种子，按“种子名+大小”识别辅种关系，用可折叠卡片展示辅种数量、保存路径与明细，支持交互筛选与可选删除。"
     plugin_icon = "seed.png"
-    plugin_version = "1.2.0"
+    plugin_version = "1.2.1"
     plugin_label = "下载器"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "crossseedview_"
@@ -102,6 +102,10 @@ class CrossSeedView(_PluginBase):
     _sort_by: str = "count"  # 排序字段: count/size/name/seeding_time/uploaded
     _sort_order: str = "desc"  # 排序方向: desc/asc
     _view_mode: str = "group"  # 视图模式: group(按分组) / downloader(按下载器聚合)
+    # 排除名单（保护配置，匹配的种子整组不进入可删除集合，不被 clear_filters 清除）
+    _exclude_name_keywords: List[str] = None  # 名称关键词（| 分隔，不区分大小写）
+    _exclude_path_keywords: List[str] = None  # 保存路径关键词（精确匹配，多选）
+    _excluded_count: int = 0  # 本次渲染因排除名单被剔除的分组数（仅信息提示用）
 
     _cache_lock: Lock = Lock()
     _cache: Dict[str, Any] = {
@@ -160,6 +164,22 @@ class CrossSeedView(_PluginBase):
             self._sort_by = str(config.get("sort_by") or "count").strip() or "count"
             self._sort_order = str(config.get("sort_order") or "desc").strip() or "desc"
             self._view_mode = str(config.get("view_mode") or "group").strip() or "group"
+            # 排除名单：读取逗号/列表形式，归一为字符串列表
+            enk = config.get("exclude_name_keywords") or ""
+            if isinstance(enk, str):
+                self._exclude_name_keywords = [
+                    k.strip().lower() for k in enk.split("|") if k.strip()
+                ]
+            elif isinstance(enk, list):
+                self._exclude_name_keywords = [str(k).strip().lower() for k in enk if str(k).strip()]
+            else:
+                self._exclude_name_keywords = []
+            epk = config.get("exclude_path_keywords") or []
+            if isinstance(epk, str):
+                epk = [epk.strip()] if epk.strip() else []
+            elif not isinstance(epk, list):
+                epk = []
+            self._exclude_path_keywords = [str(p).strip() for p in epk if str(p).strip()]
 
         # 每次初始化/重载后页码回到第一页
         self._current_page = 1
@@ -752,6 +772,35 @@ class CrossSeedView(_PluginBase):
 
         return success, fail, success_paths, fail_paths
 
+    def _is_hash_protected(self, thash: str) -> bool:
+        """判断某 hash 是否属于被排除名单保护的组。
+
+        作为删除流程双保险：即使前端通过某种方式把保护组的删除请求
+        发了过来，后端也拒绝执行，避免误删用户明确排除（保护）的资源。
+        """
+        exclude_name_kw = self._exclude_name_keywords or []
+        exclude_path_kw = self._exclude_path_keywords or []
+        if not exclude_name_kw and not exclude_path_kw:
+            return False
+        try:
+            with self._cache_lock:
+                groups = list((self._cache or {}).get("groups") or [])
+            for g in groups:
+                torrents = g.get("torrents") or []
+                if not any(str(t.get("hash") or "") == thash for t in torrents):
+                    continue
+                name_l = str(g.get("name") or "").lower()
+                save_paths = g.get("save_paths") or []
+                if any(k in name_l for k in exclude_name_kw):
+                    return True
+                if any(sp in exclude_path_kw for sp in save_paths):
+                    return True
+                return False
+        except Exception as err:  # noqa: BLE001
+            logger.debug(f"[CrossSeedView] 排除名单校验异常（放行）hash={thash}: {err}")
+            return False
+        return False
+
     def delete_torrent(self, params: DeleteTorrentParams) -> Response:
         """删除指定下载器中的单个种子。
 
@@ -763,6 +812,10 @@ class CrossSeedView(_PluginBase):
             return Response(success=False, message="删除功能未启用，请在插件设置中开启")
         if not params.hash or not params.downloader:
             return Response(success=False, message="参数不完整")
+        # 排除名单双保险：受保护的种子拒绝删除
+        if self._is_hash_protected(params.hash):
+            logger.warning(f"[CrossSeedView] 删除被排除名单拦截 hash={params.hash} downloader={params.downloader}")
+            return Response(success=False, message="该种子在排除（保护）名单中，已阻止删除")
         # v1.1.3：在 remove_torrents 之前抢救 content_path，供后续兜底查询
         content_path = self._lookup_content_paths([params.hash]).get(params.hash, "")
         # v1.1.4：在 remove_torrents 之前抢救种子名，供通知使用
@@ -856,6 +909,10 @@ class CrossSeedView(_PluginBase):
             return Response(success=False, message="插件未启用")
         if not params.hash or not params.downloader:
             return Response(success=False, message="参数不完整")
+        # 排除名单双保险：受保护的种子拒绝删除
+        if self._is_hash_protected(params.hash):
+            logger.warning(f"[CrossSeedView] 删除被排除名单拦截 hash={params.hash} downloader={params.downloader}")
+            return Response(success=False, message="该种子在排除（保护）名单中，已阻止删除")
         h = params.hash
         if h in self._selected:
             del self._selected[h]
@@ -927,9 +984,17 @@ class CrossSeedView(_PluginBase):
 
         # 按下载器分组
         by_dl: Dict[str, List[str]] = defaultdict(list)
+        blocked: List[str] = []
         for h, dl in self._selected.items():
-            if h and dl:
-                by_dl[dl].append(h)
+            if not h or not dl:
+                continue
+            # 排除名单双保险：受保护的种子从批量删除中剔除
+            if self._is_hash_protected(h):
+                blocked.append(h)
+                continue
+            by_dl[dl].append(h)
+        if blocked:
+            logger.warning(f"[CrossSeedView] 批量删除剔除 {len(blocked)} 个受保护种子")
 
         # v1.1.3：在 remove_torrents 之前抢救 content_path，供后续兜底查询
         all_hashes = [h for hs in by_dl.values() for h in hs]
@@ -1324,6 +1389,61 @@ class CrossSeedView(_PluginBase):
                         ],
                     },
                     {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "exclude_name_keywords",
+                                            "label": "排除名称关键词(保护,不区分大小写,|分隔)",
+                                            "placeholder": "如: 4K|1080p",
+                                            "clearable": True,
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VCombobox",
+                                        "props": {
+                                            "model": "exclude_path_keywords",
+                                            "label": "排除保存路径(保护,多选精确匹配)",
+                                            "items": save_path_options,
+                                            "multiple": True,
+                                            "chips": True,
+                                            "clearable": True,
+                                            "placeholder": "选择或手动输入要保护的路径",
+                                            "delimiters": [","],
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VChip",
+                                        "props": {
+                                            "size": "small",
+                                            "color": "error",
+                                            "variant": "tonal",
+                                            "class": "mt-4",
+                                        },
+                                        "text": "排除名单为受保护项：匹配的种子整组不显示删除按钮，且不参与批量删除（重置筛选不会清除）",
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
                         "component": "VAlert",
                         "props": {
                             "type": "info",
@@ -1332,6 +1452,7 @@ class CrossSeedView(_PluginBase):
                                 "扫描规则：按“种子名 + 文件大小”跨下载器分组，同组视为辅种。"
                                 "筛选项支持组合：辅种数上下限 / 下载器 / 名称关键词(|分隔多个) / "
                                 "保存路径关键词 / 大小区间。修改后保存并重载即可生效，不需重新扫描。"
+                                "「排除名称关键词 / 排除保存路径」为保护名单，匹配的种子整组不会被列为可删除项。"
                             ),
                         },
                     },
@@ -1352,6 +1473,8 @@ class CrossSeedView(_PluginBase):
             "path_keywords": [],
             "size_min_gb": 0,
             "size_max_gb": 0,
+            "exclude_name_keywords": "",
+            "exclude_path_keywords": [],
         }
         return form, defaults
 
@@ -1404,6 +1527,28 @@ class CrossSeedView(_PluginBase):
         if self._size_max_gb > 0:
             max_bytes = self._size_max_gb * gb
             filtered = [g for g in filtered if float(g.get("size") or 0) <= max_bytes]
+
+        # 7) 排除名单：匹配任意排除条件的整组剔除（保护配置，不进可删除集合）
+        #    名称关键词（| 分隔，不区分大小写，任一命中即排除整组）
+        exclude_name_kw = self._exclude_name_keywords or []
+        # 保存路径关键词（精确匹配，任一保存路径命中即排除整组）
+        exclude_path_kw = self._exclude_path_keywords or []
+        if exclude_name_kw or exclude_path_kw:
+            kept = []
+            excluded_count = 0
+            for g in filtered:
+                name_l = str(g.get("name") or "").lower()
+                save_paths = g.get("save_paths") or []
+                name_hit = any(k in name_l for k in exclude_name_kw)
+                path_hit = any(sp in exclude_path_kw for sp in save_paths)
+                if name_hit or path_hit:
+                    excluded_count += 1
+                    continue
+                kept.append(g)
+            filtered = kept
+            self._excluded_count = excluded_count
+        else:
+            self._excluded_count = 0
 
         # 排序（动态）
         sort_by = (self._sort_by or "count").lower()
@@ -1577,6 +1722,8 @@ class CrossSeedView(_PluginBase):
             filter_bits.append(f"大小 {self._size_min_gb}GB - {hi}")
         if filter_bits:
             info_text += "｜筛选：" + "，".join(filter_bits) + f"（命中 {len(items)} 组）"
+        if self._excluded_count > 0:
+            info_text += f"｜已排除保护 {self._excluded_count} 组"
         if snapshot.get("error"):
             info_text += f"｜错误：{snapshot['error']}"
 
