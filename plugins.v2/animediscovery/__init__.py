@@ -1,13 +1,20 @@
 """
 当季新番发现插件
 
-从 TMDB/Bangumi 获取当季新番列表，展示评分、海报、简介，
-并从已配置站点（如 MiKan）查询资源可用性，支持一键订阅。
+从 TMDB / Bangumi / 蜜柑 获取当季新番列表，
+支持 AI 增强简介，按日期分组排列，一键订阅追番。
 """
 
+import html
+import json
+import re
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import quote
+
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 from app.core.config import settings
 from app.log import logger
@@ -20,9 +27,9 @@ class AnimeDiscovery(_PluginBase):
     """当季新番发现插件。"""
 
     plugin_name = "当季新番"
-    plugin_desc = "发现当季新番，查看评分与站点资源，一键订阅追番。"
+    plugin_desc = "发现当季新番，AI 增强简介，一键订阅追番。"
     plugin_icon = "mdi-play-circle"
-    plugin_version = "1.1.3"
+    plugin_version = "2.2.0"
     plugin_label = "订阅"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "anime_discovery_"
@@ -30,702 +37,513 @@ class AnimeDiscovery(_PluginBase):
     auth_level = 1
 
     _enabled = False
-    _site_id: int = 0  # 用于查询资源的站点 ID（0=自动选择）
-    _min_rating: float = 0.0  # 最低评分过滤
+    _data_source = "auto"
+    _min_rating = 0.0
+    _auto_refresh = False
+    _notify_new = False
+    _use_llm = False
+    _search_keyword = ""
+    _hide_subscribed = False
     _cache: Dict[str, Any] = {}
     _cache_time: float = 0
-    _cache_ttl: int = 3600  # 缓存 1 小时
+    _cache_ttl: int = 3600
+    _scheduler: Optional[BackgroundScheduler] = None
 
     def init_plugin(self, config: dict = None) -> None:
-        """根据插件配置初始化运行状态。"""
         self.stop_service()
         self._enabled = False
-        self._site_id = 0
-        self._custom_url = ""
+        self._data_source = "auto"
         self._min_rating = 0.0
+        self._auto_refresh = False
+        self._notify_new = False
+        self._use_llm = False
         if not config:
             return
         self._enabled = bool(config.get("enabled"))
-        self._site_id = int(config.get("site_id") or 0)
-        self._custom_url = str(config.get("custom_url") or "")
+        self._data_source = str(config.get("data_source") or "auto")
         self._min_rating = float(config.get("min_rating") or 0.0)
+        self._auto_refresh = bool(config.get("auto_refresh"))
+        self._notify_new = bool(config.get("notify_new"))
+        self._use_llm = bool(config.get("use_llm"))
+
+        if self._enabled and self._auto_refresh:
+            self._scheduler = BackgroundScheduler(timezone=settings.TZ)
+            self._scheduler.add_job(func=self._scheduled_refresh, trigger=CronTrigger.from_crontab("0 10 * * *"), name="当季新番自动刷新")
+            self._scheduler.start()
 
     def get_state(self) -> bool:
-        """获取插件启用状态。"""
         return self._enabled
 
     @staticmethod
     def get_command() -> List[Dict[str, Any]]:
-        """返回插件远程命令列表。"""
         return []
 
     def get_api(self) -> List[Dict[str, Any]]:
-        """返回插件 API 列表。"""
         return [
-            {
-                "path": "/refresh",
-                "endpoint": self._refresh_data,
-                "methods": ["GET"],
-                "summary": "刷新当季新番数据",
-                "auth": "bear",
-            },
-            {
-                "path": "/subscribe",
-                "endpoint": self._subscribe_anime,
-                "methods": ["POST"],
-                "summary": "订阅一部番剧",
-                "auth": "bear",
-            },
+            {"path": "/refresh", "endpoint": self._refresh_data, "methods": ["GET"], "summary": "刷新数据", "auth": "bear"},
+            {"path": "/subscribe", "endpoint": self._subscribe_anime, "methods": ["POST"], "summary": "订阅番剧", "auth": "bear"},
         ]
 
-    def _get_sites(self) -> List[Dict[str, Any]]:
-        """获取已配置的站点列表，用于下拉选择。"""
-        try:
-            from app.db.site_oper import SiteOper
-            sites = SiteOper().list_active()
-            return [{"id": site.id, "name": site.name} for site in sites if site.id]
-        except Exception as e:
-            logger.warning(f"获取站点列表失败: {e}")
+    def get_service(self) -> List[Dict[str, Any]]:
+        if not self._auto_refresh:
             return []
+        return [{"id": "AnimeDiscoveryRefresh", "name": "当季新番自动刷新", "trigger": "cron", "cron": "0 10 * * *", "func": self._scheduled_refresh, "kwargs": {}}]
 
     def get_form(self) -> Tuple[Optional[List[dict]], Dict[str, Any]]:
-        """返回插件配置表单与默认配置。"""
-        # 获取站点列表
-        site_options = [{"title": "自动选择（0）", "value": 0}]
-        for site in self._get_sites():
-            site_options.append({"title": f"{site['name']} (ID: {site['id']})", "value": site['id']})
-        
         return [
-            {
-                "component": "VForm",
-                "content": [
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VSwitch",
-                                        "props": {"model": "enabled", "label": "启用插件"},
-                                    }
-                                ],
-                            },
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VSelect",
-                                        "props": {
-                                            "model": "site_id",
-                                            "label": "资源查询站点",
-                                            "items": site_options,
-                                            "hint": "选择用于查询资源的站点，或填入自定义链接",
-                                            "persistent-hint": True,
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "custom_url",
-                                            "label": "自定义资源链接",
-                                            "hint": "可选，填入热门网站链接（如 MiKan、Bangumi 等）",
-                                            "persistent-hint": True,
-                                        },
-                                    }
-                                ],
-                            },
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "min_rating",
-                                            "label": "最低评分",
-                                            "hint": "低于此评分的番剧不显示，0=显示全部",
-                                            "persistent-hint": True,
-                                            "type": "number",
-                                        },
-                                    }
-                                ],
-                            },
-                        ],
-                    },
-                ],
-            }
-        ], {"enabled": False, "site_id": 0, "custom_url": "", "min_rating": 0.0}
+            {"component": "VForm", "content": [
+                {"component": "VRow", "content": [
+                    {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
+                        {"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件"}}
+                    ]},
+                    {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
+                        {"component": "VSelect", "props": {
+                            "model": "data_source", "label": "数据源",
+                            "items": [
+                                {"title": "自动整合（推荐）", "value": "auto"},
+                                {"title": "TMDB", "value": "tmdb"},
+                                {"title": "Bangumi", "value": "bangumi"},
+                                {"title": "蜜柑", "value": "mikan"},
+                            ],
+                        }}
+                    ]},
+                    {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
+                        {"component": "VSwitch", "props": {"model": "use_llm", "label": "AI 增强简介", "color": "purple"}},
+                    ]},
+                    {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
+                        {"component": "VTextField", "props": {"model": "min_rating", "label": "最低评分", "type": "number", "hint": "0=全部"}},
+                    ]},
+                ]},
+                {"component": "VRow", "content": [
+                    {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
+                        {"component": "VSwitch", "props": {"model": "auto_refresh", "label": "每天10点自动刷新"}},
+                    ]},
+                    {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
+                        {"component": "VSwitch", "props": {"model": "notify_new", "label": "新番发现时通知"}},
+                    ]},
+                ]},
+            ]}
+        ], {"enabled": False, "data_source": "auto", "min_rating": 0.0, "auto_refresh": False, "notify_new": False, "use_llm": False}
+
+    # ==================== 页面渲染 ====================
 
     def get_page(self) -> Optional[List[dict]]:
-        """返回插件详情页面。"""
         if not self._enabled:
             return None
-
         api_token = settings.API_TOKEN
         refresh_api = f"plugin/AnimeDiscovery/refresh?token={api_token}"
-
-        # 获取数据
         data = self._get_anime_list()
         if not data:
             return [
-                {
-                    "component": "VCard",
-                    "props": {"variant": "tonal"},
-                    "content": [
-                        {
-                            "component": "VCardText",
-                            "content": [
-                                {
-                                    "component": "div",
-                                    "props": {"class": "text-center pa-4"},
-                                    "content": [
-                                        {
-                                            "component": "VIcon",
-                                            "props": {"size": "48", "color": "grey", "class": "mb-2"},
-                                            "text": "mdi-loading",
-                                        },
-                                        {
-                                            "component": "div",
-                                            "props": {"class": "text-body-1 text-grey"},
-                                            "text": "暂无数据，点击下方按钮刷新",
-                                        },
-                                    ],
-                                }
-                            ],
-                        }
-                    ],
-                },
-                {
-                    "component": "div",
-                    "props": {"class": "text-center mt-4"},
-                    "content": [
-                        {
-                            "component": "VBtn",
-                            "props": {
-                                "color": "primary",
-                                "variant": "tonal",
-                                "prepend-icon": "mdi-refresh",
-                            },
-                            "text": "刷新当季新番",
-                            "events": {
-                                "click": {
-                                    "api": refresh_api,
-                                    "method": "get",
-                                }
-                            },
-                        }
-                    ],
-                },
+                {"component": "VCard", "props": {"variant": "tonal"}, "content": [
+                    {"component": "VCardText", "content": [
+                        {"component": "div", "props": {"class": "text-center pa-4"}, "content": [
+                            {"component": "VIcon", "props": {"size": "48", "color": "grey", "class": "mb-2"}, "text": "mdi-television"},
+                            {"component": "div", "props": {"class": "text-body-1 text-grey"}, "text": "暂无数据，点击刷新"},
+                        ]},
+                    ]},
+                ]},
+                {"component": "div", "props": {"class": "text-center mt-4"}, "content": [
+                    {"component": "VBtn", "props": {"color": "primary", "variant": "tonal", "prepend-icon": "mdi-refresh"}, "text": "刷新",
+                     "events": {"click": {"api": refresh_api, "method": "get"}}},
+                ]},
             ]
 
-        # 构建番剧卡片列表
-        cards = []
+        # 客户端过滤
+        sk = self._search_keyword.strip().lower()
+        if sk:
+            data = [a for a in data if sk in a.get("title", "").lower()]
+        if self._hide_subscribed:
+            data = [a for a in data if not a.get("subscribed")]
+
+        # 分组：有日期的按星期分，无日期的归"蜜柑资源"
+        weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+        from collections import OrderedDict
+        dated: OrderedDict = OrderedDict()
+        undated = []
         for anime in data:
-            title = anime.get("title", "未知")
-            rating = anime.get("rating", 0)
-            poster = anime.get("poster", "")
-            overview = anime.get("overview", "")[:120]
-            year = anime.get("year", "")
-            season = anime.get("season", "")
-            tmdb_id = anime.get("tmdb_id", "")
-            bangumi_id = anime.get("bangumi_id", "")
-            subscribed = anime.get("subscribed", False)
-            mikan_available = anime.get("mikan_available", False)
-            mikan_link = anime.get("mikan_link", "")
+            ad = anime.get("air_date", "")
+            try:
+                dt = datetime.strptime(ad, "%Y-%m-%d")
+                dk = weekdays[dt.weekday()]
+                dated.setdefault(dk, []).append(anime)
+            except Exception:
+                undated.append(anime)
 
-            # 评分颜色
-            if rating >= 7.0:
-                rating_color = "success"
-            elif rating >= 5.0:
-                rating_color = "warning"
-            else:
-                rating_color = "grey"
-
-            # 订阅按钮
-            subscribe_btn = {
-                "component": "VBtn",
-                "props": {
-                    "size": "small",
-                    "variant": "tonal",
-                    "prepend-icon": "mdi-plus" if not subscribed else "mdi-check",
-                    "color": "success" if subscribed else "primary",
-                    "disabled": subscribed,
-                },
-                "text": "已订阅" if subscribed else "订阅",
-            }
-            if not subscribed and tmdb_id:
-                subscribe_btn["events"] = {
-                    "click": {
-                        "api": f"plugin/AnimeDiscovery/subscribe?token={api_token}",
-                        "method": "post",
-                        "params": {
-                            "tmdb_id": tmdb_id,
-                            "title": title,
-                            "year": year,
-                        },
-                    }
-                }
-
-            # MiKan 状态
-            mikan_chip = {
-                "component": "VChip",
-                "props": {
-                    "size": "x-small",
-                    "color": "success" if mikan_available else "grey",
-                    "variant": "tonal",
-                },
-                "text": "MiKan ✓" if mikan_available else "MiKan ✗",
-            }
-
-            # 海报 + 信息卡片
-            card_content = [
-                {
-                    "component": "VRow",
-                    "props": {"no-gutters": True},
-                    "content": [
-                        {
-                            "component": "VCol",
-                            "props": {"cols": 3, "md": 2},
-                            "content": [
-                                {
-                                    "component": "VImg",
-                                    "props": {
-                                        "src": poster,
-                                        "height": "120",
-                                        "cover": True,
-                                        "rounded": "lg",
-                                    } if poster else {
-                                        "height": "120",
-                                        "rounded": "lg",
-                                        "color": "grey-lighten-3",
-                                    },
-                                }
-                            ],
-                        },
-                        {
-                            "component": "VCol",
-                            "props": {"cols": 9, "md": 10, "class": "pl-3"},
-                            "content": [
-                                {
-                                    "component": "div",
-                                    "props": {"class": "d-flex align-center mb-1"},
-                                    "content": [
-                                        {
-                                            "component": "div",
-                                            "props": {"class": "text-subtitle-1 font-weight-bold flex-grow-1"},
-                                            "text": title,
-                                        },
-                                        subscribe_btn,
-                                    ],
-                                },
-                                {
-                                    "component": "div",
-                                    "props": {"class": "text-caption text-grey mb-1"},
-                                    "text": f"{year} · 季度 {season}" if season else str(year),
-                                },
-                                {
-                                    "component": "div",
-                                    "props": {"class": "d-flex align-center mb-1"},
-                                    "content": [
-                                        {
-                                            "component": "VChip",
-                                            "props": {
-                                                "size": "x-small",
-                                                "color": rating_color,
-                                                "class": "mr-2",
-                                            },
-                                            "text": f"★ {rating}" if rating else "暂无评分",
-                                        },
-                                        mikan_chip,
-                                    ],
-                                },
-                                {
-                                    "component": "div",
-                                    "props": {"class": "text-caption text-grey", "style": "line-height: 1.4;"},
-                                    "text": overview + "..." if len(overview) >= 120 else overview,
-                                },
-                            ],
-                        },
-                    ],
-                },
-            ]
-
-            cards.append(
-                {
-                    "component": "VCard",
-                    "props": {"variant": "outlined", "class": "mb-2"},
-                    "content": [
-                        {"component": "VCardText", "content": card_content}
-                    ],
-                }
-            )
-
-        # 统计信息
         total = len(data)
         sub_count = sum(1 for a in data if a.get("subscribed"))
-        mikan_count = sum(1 for a in data if a.get("mikan_available"))
+        llm_tag = " · AI 增强" if self._use_llm else ""
 
-        return [
-            # 顶部统计
-            {
-                "component": "VRow",
-                "props": {"class": "mb-3"},
-                "content": [
-                    {
-                        "component": "VCol",
-                        "props": {"cols": 4},
-                        "content": [
-                            {
-                                "component": "VCard",
-                                "props": {"variant": "tonal", "color": "primary"},
-                                "content": [
-                                    {
-                                        "component": "VCardText",
-                                        "props": {"class": "text-center"},
-                                        "content": [
-                                            {"component": "div", "props": {"class": "text-h5 font-weight-bold"}, "text": str(total)},
-                                            {"component": "div", "props": {"class": "text-caption"}, "text": "当季新番"},
-                                        ],
-                                    }
-                                ],
-                            }
-                        ],
-                    },
-                    {
-                        "component": "VCol",
-                        "props": {"cols": 4},
-                        "content": [
-                            {
-                                "component": "VCard",
-                                "props": {"variant": "tonal", "color": "success"},
-                                "content": [
-                                    {
-                                        "component": "VCardText",
-                                        "props": {"class": "text-center"},
-                                        "content": [
-                                            {"component": "div", "props": {"class": "text-h5 font-weight-bold"}, "text": str(sub_count)},
-                                            {"component": "div", "props": {"class": "text-caption"}, "text": "已订阅"},
-                                        ],
-                                    }
-                                ],
-                            }
-                        ],
-                    },
-                    {
-                        "component": "VCol",
-                        "props": {"cols": 4},
-                        "content": [
-                            {
-                                "component": "VCard",
-                                "props": {"variant": "tonal", "color": "warning"},
-                                "content": [
-                                    {
-                                        "component": "VCardText",
-                                        "props": {"class": "text-center"},
-                                        "content": [
-                                            {"component": "div", "props": {"class": "text-h5 font-weight-bold"}, "text": str(mikan_count)},
-                                            {"component": "div", "props": {"class": "text-caption"}, "text": "MiKan 有资源"},
-                                        ],
-                                    }
-                                ],
-                            }
-                        ],
-                    },
-                ],
-            },
-            # 刷新按钮
-            {
-                "component": "div",
-                "props": {"class": "text-right mb-2"},
-                "content": [
-                    {
-                        "component": "VBtn",
-                        "props": {
-                            "size": "small",
-                            "variant": "text",
-                            "prepend-icon": "mdi-refresh",
-                        },
-                        "text": "刷新",
-                        "events": {
-                            "click": {
-                                "api": refresh_api,
-                                "method": "get",
-                            }
-                        },
-                    }
-                ],
-            },
-            # 番剧列表
-            *cards,
+        page = [
+            # 统计
+            {"component": "VRow", "props": {"class": "mb-2"}, "content": [
+                {"component": "VCol", "props": {"cols": 4}, "content": [
+                    {"component": "VCard", "props": {"variant": "tonal", "color": "primary"}, "content": [
+                        {"component": "VCardText", "props": {"class": "text-center py-2"}, "content": [
+                            {"component": "div", "props": {"class": "text-h5 font-weight-bold"}, "text": str(total)},
+                            {"component": "div", "props": {"class": "text-caption"}, "text": f"当季新番{llm_tag}"},
+                        ]},
+                    ]},
+                ]},
+                {"component": "VCol", "props": {"cols": 4}, "content": [
+                    {"component": "VCard", "props": {"variant": "tonal", "color": "success"}, "content": [
+                        {"component": "VCardText", "props": {"class": "text-center py-2"}, "content": [
+                            {"component": "div", "props": {"class": "text-h5 font-weight-bold"}, "text": str(sub_count)},
+                            {"component": "div", "props": {"class": "text-caption"}, "text": "已订阅"},
+                        ]},
+                    ]},
+                ]},
+                {"component": "VCol", "props": {"cols": 4}, "content": [
+                    {"component": "VCard", "props": {"variant": "tonal", "color": "warning"}, "content": [
+                        {"component": "VCardText", "props": {"class": "text-center py-2"}, "content": [
+                            {"component": "div", "props": {"class": "text-h5 font-weight-bold"}, "text": str(total - sub_count)},
+                            {"component": "div", "props": {"class": "text-caption"}, "text": "未订阅"},
+                        ]},
+                    ]},
+                ]},
+            ]},
+            # 工具栏
+            {"component": "VRow", "props": {"class": "mb-1", "align": "center"}, "content": [
+                {"component": "VCol", "props": {"cols": 12, "md": 5}, "content": [
+                    {"component": "VTextField", "props": {"model": "search", "label": "搜索番名", "density": "compact", "clearable": True, "hide-details": True, "prepend-inner-icon": "mdi-magnify"}},
+                ]},
+                {"component": "VCol", "props": {"cols": 6, "md": 3}, "content": [
+                    {"component": "VSwitch", "props": {"model": "hide_subscribed", "label": "仅看未订阅", "density": "compact", "hide-details": True, "color": "primary"}},
+                ]},
+                {"component": "VCol", "props": {"cols": 6, "md": 4, "class": "text-right"}, "content": [
+                    {"component": "VBtn", "props": {"size": "small", "variant": "text", "prepend-icon": "mdi-refresh"}, "text": "刷新",
+                     "events": {"click": {"api": refresh_api, "method": "get"}}},
+                ]},
+            ]},
         ]
 
-    def stop_service(self) -> None:
-        """停止插件后台服务并释放资源。"""
-        pass
+        # 按星期分组
+        for dk, animes in dated.items():
+            page.append({"component": "div", "props": {"class": "d-flex align-center mb-1 mt-2"}, "content": [
+                {"component": "VChip", "props": {"color": "primary", "variant": "flat", "size": "small", "class": "mr-2"}, "text": dk},
+                {"component": "div", "props": {"class": "text-caption text-grey"}, "text": f"{len(animes)} 部"},
+            ]})
+            cols = [self._build_anime_card(a, api_token) for a in animes]
+            if len(cols) > 1:
+                page.append({"component": "VRow", "props": {"dense": True}, "content": [
+                    {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i]]} for i in range(0, len(cols), 2)
+                ]})
+            elif cols:
+                page.append({"component": "VRow", "props": {"dense": True}, "content": [
+                    {"component": "VCol", "props": {"cols": 12}, "content": [cols[0]]},
+                ]})
 
-    # ==================== 内部方法 ====================
+        # 蜜柑独有番（无播出日期）放在最后
+        if undated:
+            page.append({"component": "VDivider", "props": {"class": "my-3"}})
+            page.append({"component": "div", "props": {"class": "d-flex align-center mb-1"}, "content": [
+                {"component": "VChip", "props": {"color": "orange", "variant": "flat", "size": "small", "class": "mr-2"}, "text": "蜜柑资源"},
+                {"component": "div", "props": {"class": "text-caption text-grey"}, "text": f"{len(undated)} 部（仅在蜜柑有资源）"},
+            ]})
+            cols = [self._build_anime_card(a, api_token) for a in undated]
+            if len(cols) > 1:
+                page.append({"component": "VRow", "props": {"dense": True}, "content": [
+                    {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i]]} for i in range(0, len(cols), 2)
+                ]})
+            elif cols:
+                page.append({"component": "VRow", "props": {"dense": True}, "content": [
+                    {"component": "VCol", "props": {"cols": 12}, "content": [cols[0]]},
+                ]})
+
+        return page
+
+    def _build_anime_card(self, anime: Dict[str, Any], api_token: str) -> dict:
+        title = anime.get("title", "未知")
+        rating = anime.get("rating", 0)
+        poster = anime.get("poster", "")
+        overview = anime.get("overview", "")[:80]
+        air_date = anime.get("air_date", "")
+        tmdb_id = anime.get("tmdb_id", "")
+        subscribed = anime.get("subscribed", False)
+        rating_color = "success" if rating >= 7.0 else ("warning" if rating >= 5.0 else "grey")
+
+        subscribe_btn = {"component": "VBtn", "props": {
+            "size": "x-small", "variant": "tonal",
+            "prepend-icon": "mdi-check" if subscribed else "mdi-plus",
+            "color": "success" if subscribed else "primary", "disabled": subscribed,
+        }, "text": "已订阅" if subscribed else "订阅"}
+        if not subscribed and tmdb_id:
+            subscribe_btn["events"] = {"click": {
+                "api": f"plugin/AnimeDiscovery/subscribe?token={api_token}",
+                "method": "post", "params": {"tmdb_id": tmdb_id, "title": title, "year": anime.get("year", "")},
+            }}
+
+        return {"component": "VCard", "props": {"variant": "outlined", "class": "mb-2"}, "content": [
+            {"component": "VRow", "props": {"no-gutters": True, "class": "fill-height"}, "content": [
+                {"component": "VCol", "props": {"cols": 4, "md": 3}, "content": [
+                    {"component": "VImg", "props": {"src": poster, "height": "150", "cover": True, "class": "rounded-l"}} if poster else
+                    {"component": "div", "props": {"style": "height:150px;background:grey-lighten-3", "class": "rounded-l"}},
+                ]},
+                {"component": "VCol", "props": {"cols": 8, "md": 9, "class": "d-flex flex-column"}, "content": [
+                    {"component": "VCardText", "props": {"class": "flex-grow-1 py-2"}, "content": [
+                        {"component": "div", "props": {"class": "d-flex align-center mb-1"}, "content": [
+                            {"component": "div", "props": {"class": "text-subtitle-1 font-weight-bold flex-grow-1 text-truncate"}, "text": title},
+                            subscribe_btn,
+                        ]},
+                        {"component": "div", "props": {"class": "d-flex align-center mb-1 flex-wrap", "style": "gap:4px"}, "content": [
+                            {"component": "VChip", "props": {"size": "x-small", "color": rating_color, "variant": "tonal"},
+                             "text": f"★ {rating}" if rating else "暂无"},
+                            {"component": "VChip", "props": {"size": "x-small", "color": "grey", "variant": "outlined"},
+                             "text": air_date[:10] if air_date else "未知日期"},
+                            {"component": "VBtn", "props": {
+                                "size": "x-small", "variant": "text", "color": "orange",
+                                "prepend-icon": "mdi-database-search", "target": "_blank",
+                                "href": anime.get("mikan_link") or f"https://mikanime.tv/Rss/Search?searchText={quote(title)}",
+                            }, "text": "蜜柑"},
+                        ]},
+                        {"component": "div", "props": {"class": "text-caption text-grey mt-1", "style": "line-height:1.4;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden"},
+                         "text": overview + "..." if len(overview) >= 80 else overview},
+                    ]},
+                ]},
+            ]},
+        ]}
+
+    # ==================== 数据获取 ====================
 
     def _get_anime_list(self) -> List[Dict[str, Any]]:
-        """获取当季新番列表（带缓存）。"""
         now = time.time()
         if self._cache.get("anime_list") and (now - self._cache_time) < self._cache_ttl:
             return self._cache["anime_list"]
 
-        anime_list = self._fetch_season_anime()
+        if self._data_source == "auto":
+            anime_list = self._fetch_auto()
+        elif self._data_source == "mikan":
+            anime_list = self._fetch_mikan()
+        elif self._data_source == "bangumi":
+            anime_list = self._fetch_bangumi()
+        else:
+            anime_list = self._fetch_tmdb()
+
         if anime_list:
-            # 检查订阅状态
             self._check_subscriptions(anime_list)
-            # 检查 MiKan 资源
-            self._check_mikan_resources(anime_list)
-            # 评分过滤
             if self._min_rating > 0:
                 anime_list = [a for a in anime_list if a.get("rating", 0) >= self._min_rating]
-            # 按评分排序
-            anime_list.sort(key=lambda x: x.get("rating", 0), reverse=True)
+
+            # AI 增强简介
+            if self._use_llm:
+                self._enhance_with_llm(anime_list)
+
+            # 新番通知
+            if self._notify_new:
+                cached = self._cache.get("anime_list") or []
+                cached_titles = {a.get("title") for a in cached}
+                new_anime = [a for a in anime_list if a.get("title") not in cached_titles]
+                if new_anime:
+                    titles = "\n".join([f"· {a.get('title')} ★{a.get('rating', 0)}" for a in new_anime[:5]])
+                    self.post_message(mtype=NotificationType.Manual, title="当季新番更新", text=f"发现 {len(new_anime)} 部新番:\n{titles}")
 
         self._cache["anime_list"] = anime_list
         self._cache_time = now
         return anime_list
 
-    def _fetch_season_anime(self) -> List[Dict[str, Any]]:
-        """从 TMDB/Bangumi 获取当季新番。"""
+    def _get_season_range(self) -> Tuple[str, str]:
+        now = datetime.now()
+        m, y = now.month, now.year
+        if m <= 3: return f"{y}-01-01", f"{y}-03-31"
+        elif m <= 6: return f"{y}-04-01", f"{y}-06-30"
+        elif m <= 9: return f"{y}-07-01", f"{y}-09-30"
+        else: return f"{y}-10-01", f"{y}-12-31"
+
+    def _get_season_label(self) -> str:
+        now = datetime.now()
+        names = {1: "冬", 4: "春", 7: "夏", 10: "秋"}
+        return f"{now.year}年{names.get(((now.month-1)//3)*3+1, '')}季"
+
+    # ==================== 数据源 ====================
+
+    def _fetch_auto(self) -> List[Dict[str, Any]]:
+        tmdb_list = self._fetch_tmdb()
+        bangumi_list = self._fetch_bangumi()
+        mikan_list = self._fetch_mikan()
+        merged: Dict[str, Dict[str, Any]] = {}
+        for a in tmdb_list:
+            k = a.get("title", "").lower().strip()
+            if k: merged[k] = a
+        for a in bangumi_list:
+            k = a.get("title", "").lower().strip()
+            if k and k not in merged:
+                merged[k] = a
+            elif k and k in merged and not merged[k].get("mikan_link") and a.get("mikan_link"):
+                merged[k]["mikan_link"] = a["mikan_link"]
+        for a in mikan_list:
+            k = a.get("title", "").lower().strip()
+            if not k: continue
+            if k in merged:
+                if not merged[k].get("mikan_link"):
+                    merged[k]["mikan_link"] = a.get("mikan_link", "")
+            else:
+                merged[k] = a
+        logger.info(f"自动整合: TMDB={len(tmdb_list)}, Bangumi={len(bangumi_list)}, 蜜柑={len(mikan_list)} → {len(merged)}")
+        return list(merged.values())
+
+    def _fetch_tmdb(self) -> List[Dict[str, Any]]:
         anime_list = []
         try:
-            # 获取当前季度
-            now = datetime.now()
-            month = now.month
-            if month <= 3:
-                season = "winter"
-                year = now.year
-            elif month <= 6:
-                season = "spring"
-                year = now.year
-            elif month <= 9:
-                season = "summer"
-                year = now.year
-            else:
-                season = "fall"
-                year = now.year
-
-            logger.info(f"当前季度: {year}年 {season}")
-            
-            # 尝试 TMDB 获取当季动画
-            try:
-                url = f"https://api.themoviedb.org/3/discover/tv"
-                params = {
-                    "api_key": settings.TMDB_API_KEY,
-                    "with_genres": "16",  # Animation
-                    "with_original_language": "ja",
-                    "first_air_date.gte": f"{year}-{'01' if season == 'winter' else '04' if season == 'spring' else '07' if season == 'summer' else '10'}-01",
-                    "first_air_date.lte": f"{year}-{'03' if season == 'winter' else '06' if season == 'spring' else '09' if season == 'summer' else '12'}-31",
-                    "sort_by": "popularity.desc",
-                    "page": 1,
-                }
-
-                request_utils = RequestUtils(proxies=settings.PROXY)
-                logger.info(f"请求 TMDB API: {url}")
-                response = request_utils.get(url, params=params, timeout=30)
-                logger.info(f"TMDB API 响应状态码: {response.status_code if response else 'None'}")
-                
-                if response and response.status_code == 200:
-                    data = response.json()
-                    results = data.get("results", [])
-                    logger.info(f"TMDB API 返回 {len(results)} 条结果")
-                    
-                    for item in results[:30]:
-                        anime_list.append({
-                            "title": item.get("name", ""),
-                            "year": str(item.get("first_air_date", "")[:4]) if item.get("first_air_date") else "",
-                            "season": f"{year}年{['冬', '春', '夏', '秋'][['winter', 'spring', 'summer', 'fall'].index(season)]}季",
-                            "rating": round(item.get("vote_average", 0), 1),
-                            "poster": f"https://image.tmdb.org/t/p/w300{item.get('poster_path', '')}" if item.get("poster_path") else "",
-                            "overview": item.get("overview", ""),
-                            "tmdb_id": item.get("id", ""),
-                            "bangumi_id": "",
-                            "subscribed": False,
-                            "mikan_available": False,
-                            "mikan_link": "",
-                        })
-                    response.close()
-                else:
-                    logger.warning(f"TMDB API 请求失败，状态码: {response.status_code if response else 'None'}")
-            except Exception as e:
-                logger.error(f"TMDB API 调用异常: {e}")
-            
-            # 如果 TMDB 失败，尝试 Bangumi API
-            if not anime_list:
-                logger.info("TMDB 无数据，尝试 Bangumi API...")
-                try:
-                    bangumi_url = "https://api.bgm.tv/calendar"
-                    request_utils = RequestUtils(proxies=settings.PROXY)
-                    response = request_utils.get(bangumi_url, timeout=30)
-                    if response and response.status_code == 200:
-                        data = response.json()
-                        # 筛选当季动画
-                        for item in data:
-                            if item.get("date", "").startswith(str(year)):
-                                anime_list.append({
-                                    "title": item.get("name", ""),
-                                    "year": str(year),
-                                    "season": f"{year}年{['冬', '春', '夏', '秋'][['winter', 'spring', 'summer', 'fall'].index(season)]}季",
-                                    "rating": round(item.get("rating", {}).get("score", 0), 1),
-                                    "poster": item.get("images", {}).get("large", ""),
-                                    "overview": item.get("summary", "")[:120],
-                                    "tmdb_id": "",
-                                    "bangumi_id": str(item.get("id", "")),
-                                    "subscribed": False,
-                                    "mikan_available": False,
-                                    "mikan_link": "",
-                                })
-                        logger.info(f"Bangumi API 返回 {len(anime_list)} 条结果")
-                    else:
-                        logger.warning(f"Bangumi API 请求失败，状态码: {response.status_code if response else 'None'}")
-                except Exception as e:
-                    logger.error(f"Bangumi API 调用异常: {e}")
-                    
+            gte, lte = self._get_season_range()
+            params = {"api_key": settings.TMDB_API_KEY, "language": "zh-CN", "with_genres": "16", "with_original_language": "ja", "first_air_date.gte": gte, "first_air_date.lte": lte, "sort_by": "popularity.desc", "page": 1}
+            ru = RequestUtils(proxies=settings.PROXY)
+            resp = ru.get("https://api.themoviedb.org/3/discover/tv", params=params, timeout=30)
+            if resp:
+                data = json.loads(resp)
+                sl = self._get_season_label()
+                for item in data.get("results", [])[:30]:
+                    anime_list.append({"title": item.get("name", ""), "year": str(item.get("first_air_date", "")[:4]) if item.get("first_air_date") else "", "air_date": item.get("first_air_date", ""), "season": sl, "rating": round(item.get("vote_average", 0), 1), "poster": f"https://image.tmdb.org/t/p/w300{item.get('poster_path', '')}" if item.get("poster_path") else "", "overview": item.get("overview", ""), "tmdb_id": item.get("id", ""), "subscribed": False})
         except Exception as e:
-            logger.error(f"获取当季新番失败: {e}")
-
+            logger.error(f"TMDB 请求失败: {e}")
         return anime_list
 
+    def _fetch_bangumi(self) -> List[Dict[str, Any]]:
+        anime_list = []
+        try:
+            ru = RequestUtils(proxies=settings.PROXY)
+            resp = ru.get("https://api.bgm.tv/calendar", timeout=30)
+            if resp:
+                data = json.loads(resp)
+                year = str(datetime.now().year)
+                sl = self._get_season_label()
+                for item in data:
+                    ad = item.get("date", "")
+                    if ad and year in ad:
+                        anime_list.append({"title": item.get("name", ""), "year": year, "air_date": ad, "season": sl, "rating": round(item.get("rating", {}).get("score", 0), 1), "poster": item.get("images", {}).get("large", ""), "overview": item.get("summary", "")[:120], "tmdb_id": "", "bangumi_id": str(item.get("id", "")), "subscribed": False})
+        except Exception as e:
+            logger.error(f"Bangumi 请求失败: {e}")
+        return anime_list
+
+    def _fetch_mikan(self) -> List[Dict[str, Any]]:
+        anime_list = []
+        try:
+            ru = RequestUtils(proxies=settings.PROXY)
+            resp = ru.get("https://mikanani.me/", timeout=30)
+            if not resp: return []
+            pattern = r'<a[^>]*href="(/Home/Bangumi/\d+)"[^>]*class="an-text"[^>]*title="([^"]*)"'
+            matches = re.findall(pattern, resp)
+            year = str(datetime.now().year)
+            sl = self._get_season_label()
+            seen = set()
+            for link_path, raw_title in matches:
+                title = html.unescape(raw_title).strip()
+                if not title or title in seen: continue
+                seen.add(title)
+                anime_list.append({"title": title, "year": year, "air_date": "", "season": sl, "rating": 0, "poster": "", "overview": f"蜜柑资源 · {title}", "tmdb_id": "", "bangumi_id": "", "mikan_link": f"https://mikanani.me{link_path}", "subscribed": False})
+        except Exception as e:
+            logger.error(f"蜜柑请求失败: {e}")
+        return anime_list
+
+    # ==================== AI 增强 ====================
+
+    def _enhance_with_llm(self, anime_list: List[Dict[str, Any]]) -> None:
+        """使用大模型增强番剧简介（通过 OpenAI 兼容 API）。"""
+        if not settings.LLM_API_KEY:
+            logger.debug("LLM API Key 未配置，跳过 AI 增强")
+            return
+
+        base_url = settings.LLM_BASE_URL or "https://api.deepseek.com"
+        model = settings.LLM_MODEL or "deepseek-chat"
+
+        # 批量处理（每批5个，减少请求次数）
+        batch_size = 5
+        for i in range(0, len(anime_list), batch_size):
+            batch = anime_list[i:i + batch_size]
+            titles_batch = []
+            for anime in batch:
+                title = anime.get("title", "")
+                overview = anime.get("overview", "")
+                if title and not anime.get("llm_enhanced"):
+                    titles_batch.append(f"{title}|||{overview[:150]}")
+
+            if not titles_batch:
+                continue
+
+            prompt = f"""你是一个动漫推荐助手。请为以下每部番剧写一段30字以内的中文推荐语。
+每行格式：番名|||推荐语
+直接输出结果，不要加标题。
+
+{chr(10).join(titles_batch)}"""
+
+            try:
+                url = f"{base_url.rstrip('/')}/chat/completions"
+                headers = {"Authorization": f"Bearer {settings.LLM_API_KEY}", "Content-Type": "application/json"}
+                payload = {"model": model, "messages": [{"role": "system", "content": "你是动漫推荐助手，回复简洁。"}, {"role": "user", "content": prompt}], "temperature": 0.7, "max_tokens": 1024}
+
+                ru = RequestUtils(proxies=settings.PROXY if settings.LLM_USE_PROXY else None)
+                resp = ru.post(url, json=payload, headers=headers, timeout=30)
+                if resp and hasattr(resp, "json"):
+                    data = resp.json()
+                    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    # 解析结果
+                    for line in content.strip().split("\n"):
+                        if "|||" in line:
+                            parts = line.split("|||", 1)
+                            if len(parts) == 2:
+                                r_title = parts[0].strip().lower()
+                                r_overview = parts[1].strip()
+                                for anime in batch:
+                                    if anime.get("title", "").lower() == r_title and r_overview:
+                                        anime["overview"] = r_overview[:100]
+                                        anime["llm_enhanced"] = True
+            except Exception as e:
+                logger.debug(f"LLM 请求失败: {e}")
+                break  # 失败时停止后续批次
+
+    # ==================== 订阅检查 ====================
+
     def _check_subscriptions(self, anime_list: List[Dict[str, Any]]) -> None:
-        """检查哪些番剧已订阅。"""
         try:
             from app.db import ScopedSession
             from app.db.models.subscribe import Subscribe
-
             db = ScopedSession()
             try:
-                subscribes = db.query(Subscribe).filter(
-                    Subscribe.state == "R",
-                    Subscribe.type == "电视剧",
-                ).all()
-                sub_titles = {s.name for s in subscribes}
-                sub_tmdb_ids = {s.tmdb_id for s in subscribes if s.tmdb_id}
-
-                for anime in anime_list:
-                    if anime.get("tmdb_id") in sub_tmdb_ids:
-                        anime["subscribed"] = True
-                    elif anime.get("title") in sub_titles:
-                        anime["subscribed"] = True
+                subs = db.query(Subscribe).filter(Subscribe.state == "R", Subscribe.type == "电视剧").all()
+                sub_ids = {s.tmdb_id for s in subs if s.tmdb_id}
+                for a in anime_list:
+                    if a.get("tmdb_id") and str(a["tmdb_id"]) in sub_ids:
+                        a["subscribed"] = True
             finally:
                 db.close()
         except Exception as e:
-            logger.warning(f"检查订阅状态失败: {e}")
+            logger.warning(f"检查订阅失败: {e}")
 
-    def _check_mikan_resources(self, anime_list: List[Dict[str, Any]]) -> None:
-        """从站点查询 MiKan 资源可用性。"""
-        # 如果提供了自定义链接，直接标记为可用
-        if self._custom_url:
-            for anime in anime_list:
-                anime["mikan_available"] = True
-                anime["mikan_link"] = self._custom_url
-            return
-        
-        try:
-            from app.helper.indexer import IndexerHelper
-
-            indexer = IndexerHelper()
-            for anime in anime_list:
-                title = anime.get("title", "")
-                if not title:
-                    continue
-                try:
-                    # 搜索站点资源
-                    results = indexer.search_by_title(title, sites=[self._site_id] if self._site_id else None)
-                    if results:
-                        anime["mikan_available"] = True
-                        # 取第一个结果的链接
-                        if hasattr(results[0], "enclosure"):
-                            anime["mikan_link"] = results[0].enclosure or ""
-                except Exception:
-                    pass
-                # 避免请求过快
-                time.sleep(0.5)
-        except Exception as e:
-            logger.warning(f"查询 MiKan 资源失败: {e}")
+    # ==================== API ====================
 
     def _refresh_data(self) -> dict:
-        """手动刷新数据（API 端点）。"""
-        logger.info("开始刷新当季新番数据...")
-        self._cache = {}
-        self._cache_time = 0
-        data = self._fetch_season_anime()
-        logger.info(f"获取到 {len(data or [])} 条原始数据")
-        if data:
-            self._check_subscriptions(data)
-            self._check_mikan_resources(data)
-            if self._min_rating > 0:
-                data = [a for a in data if a.get("rating", 0) >= self._min_rating]
-            data.sort(key=lambda x: x.get("rating", 0), reverse=True)
-        self._cache["anime_list"] = data
-        self._cache_time = time.time()
-        logger.info(f"刷新完成，最终数据 {len(data or [])} 条")
+        self._cache = {}; self._cache_time = 0
+        data = self._get_anime_list()
         return {"success": True, "count": len(data or [])}
 
-    def _subscribe_anime(self, tmdb_id: str = "", title: str = "", year: str = "") -> dict:
-        """订阅一部番剧（API 端点）。"""
-        if not tmdb_id or not title:
-            return {"success": False, "message": "缺少参数"}
+    def _scheduled_refresh(self):
+        self._cache = {}; self._cache_time = 0
+        self._get_anime_list()
 
+    def _subscribe_anime(self, tmdb_id: str = "", title: str = "", year: str = "") -> dict:
+        if not title: return {"success": False, "message": "缺少标题"}
         try:
             from app.db import ScopedSession
             from app.db.models.subscribe import Subscribe
-
             db = ScopedSession()
             try:
-                # 检查是否已存在
-                existing = db.query(Subscribe).filter(
-                    Subscribe.tmdb_id == str(tmdb_id),
-                ).first()
-                if existing:
-                    return {"success": False, "message": "已订阅"}
-
-                # 创建订阅
-                sub = Subscribe(
-                    name=title,
-                    year=year,
-                    type="电视剧",
-                    tmdb_id=str(tmdb_id),
-                    season=1,
-                    state="R",
-                )
-                db.add(sub)
+                if tmdb_id:
+                    ex = db.query(Subscribe).filter(Subscribe.tmdb_id == str(tmdb_id)).first()
+                    if ex: return {"success": False, "message": "已订阅"}
+                db.add(Subscribe(name=title, year=year, type="电视剧", tmdb_id=str(tmdb_id) if tmdb_id else "", season=1, state="R"))
                 db.commit()
-
-                # 清除缓存
-                self._cache = {}
-                self._cache_time = 0
-
-                # 发送通知
-                self.post_message(
-                    mtype=NotificationType.Manual,
-                    title="新番订阅成功",
-                    text=f"已订阅：{title} ({year})",
-                )
-
+                self._cache = {}; self._cache_time = 0
+                self.post_message(mtype=NotificationType.Manual, title="新番订阅成功", text=f"已订阅：{title} ({year})")
                 return {"success": True, "message": f"已订阅 {title}"}
             finally:
                 db.close()
         except Exception as e:
-            logger.error(f"订阅失败: {e}")
             return {"success": False, "message": str(e)}
+
+    def stop_service(self) -> None:
+        try:
+            if self._scheduler:
+                self._scheduler.remove_all_jobs()
+                if self._scheduler.running: self._scheduler.shutdown()
+                self._scheduler = None
+        except Exception as e:
+            logger.error(f"停止服务失败: {e}")
