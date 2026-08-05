@@ -39,5 +39,17 @@
       "v1.2.0": "详情页重新设计，对齐 MP 运维助手仪表盘风格：tonal 统计卡 + 网格动作按钮 + 圆角描边列表行，保留全部原有功能。",
       "v1.0.0": "初始版本，支持断链软链接、空目录、失败整理记录扫描与清理。"
     }
+  },
+  "AnimeDiscovery": {
+    "name": "当季新番",
+    "description": "发现当季新番，查看评分与站点资源，一键订阅追番。",
+    "labels": "订阅",
+    "version": "1.0.0",
+    "icon": "mdi-play-circle",
+    "author": "zhuzhug",
+    "level": 1,
+    "history": {
+      "v1.0.0": "初始版本：TMDB/Bangumi 当季新番发现 + MiKan 资源查询 + 一键订阅"
+    }
   }
 }
