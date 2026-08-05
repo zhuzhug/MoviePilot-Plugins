@@ -22,7 +22,7 @@ class AnimeDiscovery(_PluginBase):
     plugin_name = "当季新番"
     plugin_desc = "发现当季新番，查看评分与站点资源，一键订阅追番。"
     plugin_icon = "mdi-play-circle"
-    plugin_version = "1.0.0"
+    plugin_version = "1.1.0"
     plugin_label = "订阅"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "anime_discovery_"
