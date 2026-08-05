@@ -22,7 +22,7 @@ class AnimeDiscovery(_PluginBase):
     plugin_name = "当季新番"
     plugin_desc = "发现当季新番，查看评分与站点资源，一键订阅追番。"
     plugin_icon = "mdi-play-circle"
-    plugin_version = "1.1.2"
+    plugin_version = "1.1.3"
     plugin_label = "订阅"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "anime_discovery_"
@@ -526,40 +526,82 @@ class AnimeDiscovery(_PluginBase):
                 season = "fall"
                 year = now.year
 
-            # TMDB 获取当季动画
-            url = f"https://api.themoviedb.org/3/discover/tv"
-            params = {
-                "api_key": settings.TMDB_API_KEY,
-                "with_genres": "16",  # Animation
-                "with_original_language": "ja",
-                "first_air_date.gte": f"{year}-{'01' if season == 'winter' else '04' if season == 'spring' else '07' if season == 'summer' else '10'}-01",
-                "first_air_date.lte": f"{year}-{'03' if season == 'winter' else '06' if season == 'spring' else '09' if season == 'summer' else '12'}-31",
-                "sort_by": "popularity.desc",
-                "page": 1,
-            }
+            logger.info(f"当前季度: {year}年 {season}")
+            
+            # 尝试 TMDB 获取当季动画
+            try:
+                url = f"https://api.themoviedb.org/3/discover/tv"
+                params = {
+                    "api_key": settings.TMDB_API_KEY,
+                    "with_genres": "16",  # Animation
+                    "with_original_language": "ja",
+                    "first_air_date.gte": f"{year}-{'01' if season == 'winter' else '04' if season == 'spring' else '07' if season == 'summer' else '10'}-01",
+                    "first_air_date.lte": f"{year}-{'03' if season == 'winter' else '06' if season == 'spring' else '09' if season == 'summer' else '12'}-31",
+                    "sort_by": "popularity.desc",
+                    "page": 1,
+                }
 
-            request_utils = RequestUtils(proxies=settings.PROXY)
-            logger.info(f"请求 TMDB API: {url}")
-            response = request_utils.get(url, params=params)
-            logger.info(f"TMDB API 响应状态码: {response.status_code if response else 'None'}")
-            if response:
-                data = response.json()
-                logger.info(f"TMDB API 返回 {len(data.get('results', []))} 条结果")
-                for item in data.get("results", [])[:30]:
-                    anime_list.append({
-                        "title": item.get("name", ""),
-                        "year": str(item.get("first_air_date", "")[:4]) if item.get("first_air_date") else "",
-                        "season": f"{year}年{['冬', '春', '夏', '秋'][['winter', 'spring', 'summer', 'fall'].index(season)]}季",
-                        "rating": round(item.get("vote_average", 0), 1),
-                        "poster": f"https://image.tmdb.org/t/p/w300{item.get('poster_path', '')}" if item.get("poster_path") else "",
-                        "overview": item.get("overview", ""),
-                        "tmdb_id": item.get("id", ""),
-                        "bangumi_id": "",
-                        "subscribed": False,
-                        "mikan_available": False,
-                        "mikan_link": "",
-                    })
-                response.close()
+                request_utils = RequestUtils(proxies=settings.PROXY)
+                logger.info(f"请求 TMDB API: {url}")
+                response = request_utils.get(url, params=params, timeout=30)
+                logger.info(f"TMDB API 响应状态码: {response.status_code if response else 'None'}")
+                
+                if response and response.status_code == 200:
+                    data = response.json()
+                    results = data.get("results", [])
+                    logger.info(f"TMDB API 返回 {len(results)} 条结果")
+                    
+                    for item in results[:30]:
+                        anime_list.append({
+                            "title": item.get("name", ""),
+                            "year": str(item.get("first_air_date", "")[:4]) if item.get("first_air_date") else "",
+                            "season": f"{year}年{['冬', '春', '夏', '秋'][['winter', 'spring', 'summer', 'fall'].index(season)]}季",
+                            "rating": round(item.get("vote_average", 0), 1),
+                            "poster": f"https://image.tmdb.org/t/p/w300{item.get('poster_path', '')}" if item.get("poster_path") else "",
+                            "overview": item.get("overview", ""),
+                            "tmdb_id": item.get("id", ""),
+                            "bangumi_id": "",
+                            "subscribed": False,
+                            "mikan_available": False,
+                            "mikan_link": "",
+                        })
+                    response.close()
+                else:
+                    logger.warning(f"TMDB API 请求失败，状态码: {response.status_code if response else 'None'}")
+            except Exception as e:
+                logger.error(f"TMDB API 调用异常: {e}")
+            
+            # 如果 TMDB 失败，尝试 Bangumi API
+            if not anime_list:
+                logger.info("TMDB 无数据，尝试 Bangumi API...")
+                try:
+                    bangumi_url = "https://api.bgm.tv/calendar"
+                    request_utils = RequestUtils(proxies=settings.PROXY)
+                    response = request_utils.get(bangumi_url, timeout=30)
+                    if response and response.status_code == 200:
+                        data = response.json()
+                        # 筛选当季动画
+                        for item in data:
+                            if item.get("date", "").startswith(str(year)):
+                                anime_list.append({
+                                    "title": item.get("name", ""),
+                                    "year": str(year),
+                                    "season": f"{year}年{['冬', '春', '夏', '秋'][['winter', 'spring', 'summer', 'fall'].index(season)]}季",
+                                    "rating": round(item.get("rating", {}).get("score", 0), 1),
+                                    "poster": item.get("images", {}).get("large", ""),
+                                    "overview": item.get("summary", "")[:120],
+                                    "tmdb_id": "",
+                                    "bangumi_id": str(item.get("id", "")),
+                                    "subscribed": False,
+                                    "mikan_available": False,
+                                    "mikan_link": "",
+                                })
+                        logger.info(f"Bangumi API 返回 {len(anime_list)} 条结果")
+                    else:
+                        logger.warning(f"Bangumi API 请求失败，状态码: {response.status_code if response else 'None'}")
+                except Exception as e:
+                    logger.error(f"Bangumi API 调用异常: {e}")
+                    
         except Exception as e:
             logger.error(f"获取当季新番失败: {e}")
 
@@ -624,9 +666,11 @@ class AnimeDiscovery(_PluginBase):
 
     def _refresh_data(self) -> dict:
         """手动刷新数据（API 端点）。"""
+        logger.info("开始刷新当季新番数据...")
         self._cache = {}
         self._cache_time = 0
         data = self._fetch_season_anime()
+        logger.info(f"获取到 {len(data or [])} 条原始数据")
         if data:
             self._check_subscriptions(data)
             self._check_mikan_resources(data)
@@ -635,6 +679,7 @@ class AnimeDiscovery(_PluginBase):
             data.sort(key=lambda x: x.get("rating", 0), reverse=True)
         self._cache["anime_list"] = data
         self._cache_time = time.time()
+        logger.info(f"刷新完成，最终数据 {len(data or [])} 条")
         return {"success": True, "count": len(data or [])}
 
     def _subscribe_anime(self, tmdb_id: str = "", title: str = "", year: str = "") -> dict:
