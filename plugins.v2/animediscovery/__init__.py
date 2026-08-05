@@ -22,7 +22,7 @@ class AnimeDiscovery(_PluginBase):
     plugin_name = "当季新番"
     plugin_desc = "发现当季新番，查看评分与站点资源，一键订阅追番。"
     plugin_icon = "mdi-play-circle"
-    plugin_version = "1.1.1"
+    plugin_version = "1.1.2"
     plugin_label = "订阅"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "anime_discovery_"
@@ -539,9 +539,12 @@ class AnimeDiscovery(_PluginBase):
             }
 
             request_utils = RequestUtils(proxies=settings.PROXY)
+            logger.info(f"请求 TMDB API: {url}")
             response = request_utils.get(url, params=params)
+            logger.info(f"TMDB API 响应状态码: {response.status_code if response else 'None'}")
             if response:
                 data = response.json()
+                logger.info(f"TMDB API 返回 {len(data.get('results', []))} 条结果")
                 for item in data.get("results", [])[:30]:
                     anime_list.append({
                         "title": item.get("name", ""),
