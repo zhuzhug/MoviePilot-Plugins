@@ -41,11 +41,13 @@ class AnimeDiscovery(_PluginBase):
         self.stop_service()
         self._enabled = False
         self._site_id = 0
+        self._custom_url = ""
         self._min_rating = 0.0
         if not config:
             return
         self._enabled = bool(config.get("enabled"))
         self._site_id = int(config.get("site_id") or 0)
+        self._custom_url = str(config.get("custom_url") or "")
         self._min_rating = float(config.get("min_rating") or 0.0)
 
     def get_state(self) -> bool:
@@ -76,8 +78,23 @@ class AnimeDiscovery(_PluginBase):
             },
         ]
 
+    def _get_sites(self) -> List[Dict[str, Any]]:
+        """获取已配置的站点列表，用于下拉选择。"""
+        try:
+            from app.helper.site import SiteHelper
+            sites = SiteHelper().get_sites()
+            return [{"id": site.id, "name": site.name} for site in sites if site.id]
+        except Exception as e:
+            logger.warning(f"获取站点列表失败: {e}")
+            return []
+
     def get_form(self) -> Tuple[Optional[List[dict]], Dict[str, Any]]:
         """返回插件配置表单与默认配置。"""
+        # 获取站点列表
+        site_options = [{"title": "自动选择（0）", "value": 0}]
+        for site in self._get_sites():
+            site_options.append({"title": f"{site['name']} (ID: {site['id']})", "value": site['id']})
+        
         return [
             {
                 "component": "VForm",
@@ -105,16 +122,37 @@ class AnimeDiscovery(_PluginBase):
                                 "props": {"cols": 12, "md": 6},
                                 "content": [
                                     {
-                                        "component": "VTextField",
+                                        "component": "VSelect",
                                         "props": {
                                             "model": "site_id",
-                                            "label": "资源查询站点 ID",
-                                            "hint": "填 0 自动选择，或填具体站点 ID（如 MiKan 的 ID）",
+                                            "label": "资源查询站点",
+                                            "items": site_options,
+                                            "hint": "选择用于查询资源的站点，或填入自定义链接",
                                             "persistent-hint": True,
                                         },
                                     }
                                 ],
                             },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "custom_url",
+                                            "label": "自定义资源链接",
+                                            "hint": "可选，填入热门网站链接（如 MiKan、Bangumi 等）",
+                                            "persistent-hint": True,
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
                             {
                                 "component": "VCol",
                                 "props": {"cols": 12, "md": 6},
@@ -135,7 +173,7 @@ class AnimeDiscovery(_PluginBase):
                     },
                 ],
             }
-        ], {"enabled": False, "site_id": 0, "min_rating": 0.0}
+        ], {"enabled": False, "site_id": 0, "custom_url": "", "min_rating": 0.0}
 
     def get_page(self) -> Optional[List[dict]]:
         """返回插件详情页面。"""
@@ -551,6 +589,13 @@ class AnimeDiscovery(_PluginBase):
 
     def _check_mikan_resources(self, anime_list: List[Dict[str, Any]]) -> None:
         """从站点查询 MiKan 资源可用性。"""
+        # 如果提供了自定义链接，直接标记为可用
+        if self._custom_url:
+            for anime in anime_list:
+                anime["mikan_available"] = True
+                anime["mikan_link"] = self._custom_url
+            return
+        
         try:
             from app.helper.indexer import IndexerHelper
 
