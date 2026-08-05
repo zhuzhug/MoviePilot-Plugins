@@ -22,7 +22,7 @@ class AnimeDiscovery(_PluginBase):
     plugin_name = "当季新番"
     plugin_desc = "发现当季新番，查看评分与站点资源，一键订阅追番。"
     plugin_icon = "mdi-play-circle"
-    plugin_version = "1.1.0"
+    plugin_version = "1.1.1"
     plugin_label = "订阅"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "anime_discovery_"
@@ -81,8 +81,8 @@ class AnimeDiscovery(_PluginBase):
     def _get_sites(self) -> List[Dict[str, Any]]:
         """获取已配置的站点列表，用于下拉选择。"""
         try:
-            from app.helper.site import SiteHelper
-            sites = SiteHelper().get_sites()
+            from app.db.site_oper import SiteOper
+            sites = SiteOper().list_active()
             return [{"id": site.id, "name": site.name} for site in sites if site.id]
         except Exception as e:
             logger.warning(f"获取站点列表失败: {e}")
