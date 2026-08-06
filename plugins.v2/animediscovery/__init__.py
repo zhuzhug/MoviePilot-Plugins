@@ -29,7 +29,7 @@ class AnimeDiscovery(_PluginBase):
     plugin_name = "当季新番"
     plugin_desc = "发现当季新番，AI 增强简介，一键订阅追番。"
     plugin_icon = "mdi-play-circle"
-    plugin_version = "2.2.0"
+    plugin_version = "2.2.1"
     plugin_label = "订阅"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "anime_discovery_"
@@ -48,6 +48,7 @@ class AnimeDiscovery(_PluginBase):
     _cache_time: float = 0
     _cache_ttl: int = 3600
     _scheduler: Optional[BackgroundScheduler] = None
+    _last_notify_date: str = ""  # 上次通知日期，防止重复推送
 
     def init_plugin(self, config: dict = None) -> None:
         self.stop_service()
@@ -57,6 +58,7 @@ class AnimeDiscovery(_PluginBase):
         self._auto_refresh = False
         self._notify_new = False
         self._use_llm = False
+        self._last_notify_date = ""
         if not config:
             return
         self._enabled = bool(config.get("enabled"))
@@ -328,14 +330,20 @@ class AnimeDiscovery(_PluginBase):
             if self._use_llm:
                 self._enhance_with_llm(anime_list)
 
-            # 新番通知
+            # 新番通知（每天最多推送一次）
             if self._notify_new:
-                cached = self._cache.get("anime_list") or []
-                cached_titles = {a.get("title") for a in cached}
-                new_anime = [a for a in anime_list if a.get("title") not in cached_titles]
-                if new_anime:
-                    titles = "\n".join([f"· {a.get('title')} ★{a.get('rating', 0)}" for a in new_anime[:5]])
-                    self.post_message(mtype=NotificationType.Manual, title="当季新番更新", text=f"发现 {len(new_anime)} 部新番:\n{titles}")
+                today = datetime.now().strftime("%Y-%m-%d")
+                if self._last_notify_date == today:
+                    logger.info("今日已推送过新番通知，跳过")
+                else:
+                    cached = self._cache.get("anime_list") or []
+                    cached_titles = {a.get("title") for a in cached}
+                    new_anime = [a for a in anime_list if a.get("title") not in cached_titles]
+                    if new_anime:
+                        titles = "\n".join([f"· {a.get('title')} ★{a.get('rating', 0)}" for a in new_anime[:5]])
+                        self.post_message(mtype=NotificationType.Manual, title="当季新番更新", text=f"发现 {len(new_anime)} 部新番:\n{titles}")
+                        self._last_notify_date = today
+                        logger.info(f"已推送新番通知，今日日期: {today}")
 
         self._cache["anime_list"] = anime_list
         self._cache_time = now
