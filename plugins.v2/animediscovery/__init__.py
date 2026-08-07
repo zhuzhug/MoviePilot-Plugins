@@ -27,9 +27,9 @@ class AnimeDiscovery(_PluginBase):
     """当季新番发现插件。"""
 
     plugin_name = "当季新番"
-    plugin_desc = "发现当季新番，按日期分组排列，一键订阅追番。"
+    plugin_desc = "发现当季新番，按日期分组，一键订阅追番。"
     plugin_icon = "mdi-play-circle"
-    plugin_version = "2.2.9"
+    plugin_version = "2.3.0"
     plugin_label = "订阅"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "anime_discovery_"
@@ -43,12 +43,11 @@ class AnimeDiscovery(_PluginBase):
     _notify_new = False
     _search_keyword = ""
     _hide_subscribed = False
-    _notify_mode = "today"  # "new"=新番发现, "today"=按星期推送当天更新
     _cache: Dict[str, Any] = {}
     _cache_time: float = 0
     _cache_ttl: int = 3600
-    _scheduler: Optional[BackgroundScheduler] = None
-    _last_notify_date: str = ""  # 上次通知日期，防止重复推送
+    _scheduler: Optional[BackgroundScheduler] = None  # deprecated, kept for stop_service compat
+    _last_notify_date: str = ""  # 上次通知日期，防止重复推送（持久化）
 
     def init_plugin(self, config: dict = None) -> None:
         self.stop_service()
@@ -56,9 +55,7 @@ class AnimeDiscovery(_PluginBase):
         self._data_source = "auto"
         self._min_rating = 0.0
         self._auto_refresh = False
-        self._refresh_cron = "0 10 * * *"
         self._notify_new = False
-        self._notify_mode = "today"
         self._last_notify_date = ""
         if not config:
             return
@@ -66,9 +63,17 @@ class AnimeDiscovery(_PluginBase):
         self._data_source = str(config.get("data_source") or "auto")
         self._min_rating = float(config.get("min_rating") or 0.0)
         self._auto_refresh = bool(config.get("auto_refresh"))
-        self._refresh_cron = str(config.get("refresh_cron") or "0 10 * * *")
         self._notify_new = bool(config.get("notify_new"))
-        self._notify_mode = str(config.get("notify_mode") or "today")
+
+        # 从持久化数据恢复上次通知日期，防止重启后重复推送
+        try:
+            saved = self.get_data("last_notify_date")
+            if saved:
+                self._last_notify_date = str(saved)
+        except Exception:
+            pass
+
+        # 调度由 get_service 统一注册到 MP 系统调度器，不再自建 BackgroundScheduler
 
     def get_state(self) -> bool:
         return self._enabled
@@ -86,7 +91,7 @@ class AnimeDiscovery(_PluginBase):
     def get_service(self) -> List[Dict[str, Any]]:
         if not self._auto_refresh:
             return []
-        return [{"id": "AnimeDiscoveryRefresh", "name": "当季新番自动刷新", "trigger": "cron", "cron": self._refresh_cron, "func": self._scheduled_refresh, "kwargs": {}}]
+        return [{"id": "AnimeDiscoveryRefresh", "name": "当季新番自动刷新", "trigger": "cron", "cron": "0 10 * * *", "func": self._scheduled_refresh, "kwargs": {}}]
 
     def get_form(self) -> Tuple[Optional[List[dict]], Dict[str, Any]]:
         return [
@@ -112,31 +117,14 @@ class AnimeDiscovery(_PluginBase):
                 ]},
                 {"component": "VRow", "content": [
                     {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                        {"component": "VSwitch", "props": {"model": "auto_refresh", "label": "自动刷新"}},
+                        {"component": "VSwitch", "props": {"model": "auto_refresh", "label": "每天10点自动刷新"}},
                     ]},
                     {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                        {"component": "VTextField", "props": {"model": "refresh_cron", "label": "刷新时间（Cron）", "hint": "如 0 10 * * * 表示每天10点"}},
-                    ]},
-                ]},
-                {"component": "VRow", "content": [
-                    {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                        {"component": "VSwitch", "props": {"model": "notify_new", "label": "新番更新通知"}},
-                    ]},
-                ]},
-                {"component": "VRow", "content": [
-                    {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                        {"component": "VSelect", "props": {
-                            "model": "notify_mode", "label": "通知模式",
-                            "items": [
-                                {"title": "按星期推送当天更新（推荐）", "value": "today"},
-                                {"title": "新番发现时推送", "value": "new"},
-                            ],
-                            "hint": "按星期推送：每天推送当天星期几更新的番；新番发现：发现新番时推送前5部",
-                        }},
+                        {"component": "VSwitch", "props": {"model": "notify_new", "label": "新番发现时通知"}},
                     ]},
                 ]},
             ]}
-        ], {"enabled": False, "data_source": "auto", "min_rating": 0.0, "auto_refresh": False, "refresh_cron": "0 10 * * *", "notify_new": False, "notify_mode": "today"}
+        ], {"enabled": False, "data_source": "auto", "min_rating": 0.0, "auto_refresh": False, "notify_new": False}
 
     # ==================== 页面渲染 ====================
 
@@ -281,7 +269,7 @@ class AnimeDiscovery(_PluginBase):
         }, "text": "已订阅" if subscribed else "订阅"}
         if not subscribed and tmdb_id:
             subscribe_btn["events"] = {"click": {
-                "api": f"plugin/AnimeDiscovery/subscribe?token={api_token}",
+                "api": f"plugin/AnimeDiscovery/subscribe?apikey={api_token}",
                 "method": "post", "params": {"tmdb_id": tmdb_id, "title": title, "year": anime.get("year", "")},
             }}
 
@@ -336,41 +324,30 @@ class AnimeDiscovery(_PluginBase):
             if self._min_rating > 0:
                 anime_list = [a for a in anime_list if a.get("rating", 0) >= self._min_rating]
 
-            # 新番通知
+            # 新番通知（每天最多推送一次）
             if self._notify_new:
                 today = datetime.now().strftime("%Y-%m-%d")
                 if self._last_notify_date == today:
                     logger.info("今日已推送过新番通知，跳过")
                 else:
-                    if self._notify_mode == "today":
-                        # 按星期推送当天更新的番
-                        weekday = datetime.now().weekday()
-                        weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
-                        today_name = weekdays[weekday]
-                        today_anime = []
-                        for a in anime_list:
-                            ad = a.get("air_date", "")
-                            try:
-                                dt = datetime.strptime(ad, "%Y-%m-%d")
-                                if dt.weekday() == weekday:
-                                    today_anime.append(a)
-                            except Exception:
-                                pass
-                        if today_anime:
-                            titles = "\n".join([f"· {a.get('title')} ★{a.get('rating', 0)}" for a in today_anime])
-                            self.post_message(mtype=NotificationType.Manual, title=f"今日新番更新（{today_name}）", text=f"今天有 {len(today_anime)} 部番剧更新:\n{titles}")
-                            self._last_notify_date = today
-                            logger.info(f"已推送今日新番通知（{today_name}），共 {len(today_anime)} 部")
-                    else:
-                        # 旧逻辑：新番发现时推送前5部
-                        cached = self._cache.get("anime_list") or []
-                        cached_titles = {a.get("title") for a in cached}
-                        new_anime = [a for a in anime_list if a.get("title") not in cached_titles]
-                        if new_anime:
-                            titles = "\n".join([f"· {a.get('title')} ★{a.get('rating', 0)}" for a in new_anime[:5]])
-                            self.post_message(mtype=NotificationType.Manual, title="当季新番更新", text=f"发现 {len(new_anime)} 部新番:\n{titles}")
-                            self._last_notify_date = today
-                            logger.info(f"已推送新番通知，今日日期: {today}")
+                    # 用持久化的上次列表做比对，避免缓存过期导致全量推送
+                    saved_list = self.get_data("last_anime_titles") or []
+                    saved_titles = set(saved_list)
+                    new_anime = [a for a in anime_list if a.get("title") and a["title"] not in saved_titles]
+                    if new_anime:
+                        titles = "\n".join([f"· {a.get('title')} ★{a.get('rating', 0)}" for a in new_anime[:5]])
+                        self.post_message(mtype=NotificationType.Manual, title="当季新番更新", text=f"发现 {len(new_anime)} 部新番:\n{titles}")
+                        self._last_notify_date = today
+                        try:
+                            self.save_data("last_notify_date", today)
+                        except Exception:
+                            pass
+                        logger.info(f"已推送新番通知，今日日期: {today}")
+                    # 无论是否推送，都更新持久化列表
+                    try:
+                        self.save_data("last_anime_titles", [a.get("title", "") for a in anime_list if a.get("title")])
+                    except Exception:
+                        pass
 
         self._cache["anime_list"] = anime_list
         self._cache_time = now
@@ -469,6 +446,62 @@ class AnimeDiscovery(_PluginBase):
             logger.error(f"蜜柑请求失败: {e}")
         return anime_list
 
+    # ==================== AI 增强 ====================
+
+    def _enhance_with_llm(self, anime_list: List[Dict[str, Any]]) -> None:
+        """使用大模型增强番剧简介（通过 OpenAI 兼容 API）。"""
+        if not settings.LLM_API_KEY:
+            logger.debug("LLM API Key 未配置，跳过 AI 增强")
+            return
+
+        base_url = settings.LLM_BASE_URL or "https://api.deepseek.com"
+        model = settings.LLM_MODEL or "deepseek-chat"
+
+        # 批量处理（每批5个，减少请求次数）
+        batch_size = 5
+        for i in range(0, len(anime_list), batch_size):
+            batch = anime_list[i:i + batch_size]
+            titles_batch = []
+            for anime in batch:
+                title = anime.get("title", "")
+                overview = anime.get("overview", "")
+                if title and not anime.get("llm_enhanced"):
+                    titles_batch.append(f"{title}|||{overview[:150]}")
+
+            if not titles_batch:
+                continue
+
+            prompt = f"""你是一个动漫推荐助手。请为以下每部番剧写一段30字以内的中文推荐语。
+每行格式：番名|||推荐语
+直接输出结果，不要加标题。
+
+{chr(10).join(titles_batch)}"""
+
+            try:
+                url = f"{base_url.rstrip('/')}/chat/completions"
+                headers = {"Authorization": f"Bearer {settings.LLM_API_KEY}", "Content-Type": "application/json"}
+                payload = {"model": model, "messages": [{"role": "system", "content": "你是动漫推荐助手，回复简洁。"}, {"role": "user", "content": prompt}], "temperature": 0.7, "max_tokens": 1024}
+
+                ru = RequestUtils(proxies=settings.PROXY if settings.LLM_USE_PROXY else None)
+                resp = ru.post(url, json=payload, headers=headers, timeout=30)
+                if resp and hasattr(resp, "json"):
+                    data = resp.json()
+                    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    # 解析结果
+                    for line in content.strip().split("\n"):
+                        if "|||" in line:
+                            parts = line.split("|||", 1)
+                            if len(parts) == 2:
+                                r_title = parts[0].strip().lower()
+                                r_overview = parts[1].strip()
+                                for anime in batch:
+                                    if anime.get("title", "").lower() == r_title and r_overview:
+                                        anime["overview"] = r_overview[:100]
+                                        anime["llm_enhanced"] = True
+            except Exception as e:
+                logger.debug(f"LLM 请求失败: {e}")
+                break  # 失败时停止后续批次
+
     # ==================== 订阅检查 ====================
 
     def _check_subscriptions(self, anime_list: List[Dict[str, Any]]) -> None:
@@ -480,7 +513,7 @@ class AnimeDiscovery(_PluginBase):
                 subs = db.query(Subscribe).filter(Subscribe.state == "R", Subscribe.type == "电视剧").all()
                 sub_ids = {s.tmdbid for s in subs if s.tmdbid}
                 for a in anime_list:
-                    if a.get("tmdb_id") and str(a["tmdb_id"]) in sub_ids:
+                    if a.get("tmdb_id") and int(a["tmdb_id"]) in sub_ids:
                         a["subscribed"] = True
             finally:
                 db.close()
