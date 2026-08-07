@@ -34,6 +34,7 @@ class SubscribeParams(BaseModel):
     tmdb_id: Optional[Union[str, int]] = Field(default=None, description="TMDB ID")
     bangumi_id: Optional[Union[str, int]] = Field(default=None, description="Bangumi ID")
     media_type: str = Field(default="tv", description="媒体类型: tv 或 movie")
+    mikan_id: Optional[str] = Field(default=None, description="蜜柑ID")
 
 
 class AnimeDiscovery(_PluginBase):
@@ -42,7 +43,7 @@ class AnimeDiscovery(_PluginBase):
     plugin_name = "当季新番"
     plugin_desc = "发现当季新番，按日期分组，一键订阅追番。"
     plugin_icon = "mdi-play-circle"
-    plugin_version = "2.7.0"
+    plugin_version = "2.9.0"
     plugin_label = "订阅"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "anime_discovery_"
@@ -386,6 +387,7 @@ class AnimeDiscovery(_PluginBase):
         params = {"title": title, "year": anime.get("year", ""), "media_type": anime.get("media_type", "tv")}
         if tmdb_id: params["tmdb_id"] = tmdb_id
         if bangumi_id: params["bangumi_id"] = bangumi_id
+        if anime.get("mikan_id"): params["mikan_id"] = anime["mikan_id"]
         
         if subscribed:
             # 已订阅状态，点击取消订阅
@@ -600,7 +602,9 @@ class AnimeDiscovery(_PluginBase):
                 title = html.unescape(raw_title).strip()
                 if not title or title in seen: continue
                 seen.add(title)
-                anime_list.append({"title": title, "year": year, "air_date": "", "season": sl, "rating": 0, "poster": "", "overview": f"蜜柑资源 · {title}", "tmdb_id": "", "bangumi_id": "", "mikan_link": f"https://mikanime.tv{link_path}", "subscribed": False})
+                # 从link_path提取蜜柑ID
+                mikan_id = link_path.split('/')[-1] if link_path else ""
+                anime_list.append({"title": title, "year": year, "air_date": "", "season": sl, "rating": 0, "poster": "", "overview": f"蜜柑资源 · {title}", "tmdb_id": "", "bangumi_id": "", "mikan_link": f"https://mikanime.tv{link_path}", "mikan_id": mikan_id, "subscribed": False})
         except Exception as e:
             logger.error(f"蜜柑请求失败: {e}")
         return anime_list
@@ -683,18 +687,36 @@ class AnimeDiscovery(_PluginBase):
                                 continue
                         except (ValueError, TypeError):
                             pass
-                    # 按标题匹配（Bangumi/蜜柑来源无 tmdb_id），智能匹配（忽略标点符号、空格、大小写）
-                    def normalize_title(t):
-                        # 去除标点符号和特殊字符，只保留字母数字和中文
-                        return re.sub(r'[^\w\s]', '', t).lower().strip()
+                    # 混合匹配策略：TMDB ID > 蜜柑ID > 智能标题匹配
+                    mikan_id = a.get("mikan_id", "")
+                    matched = False
                     
-                    title = normalize_title(a.get("title", ""))
-                    sub_names_normalized = {normalize_title(name): name for name in sub_names}
-                    if title and title in sub_names_normalized:
-                        a["subscribed"] = True
-                        logger.info(f"标题匹配成功: {title} -> {sub_names_normalized[title]}")
-                    else:
-                        logger.info(f"标题匹配失败: {title}, 可用订阅标题: {list(sub_names_normalized.keys())[:5]}")
+                    # 1. 蜜柑ID匹配（通过本地映射表）
+                    if mikan_id:
+                        try:
+                            mikan_map = self.get_data("mikan_subscription_map") or {}
+                            if mikan_id in mikan_map:
+                                a["subscribed"] = True
+                                matched = True
+                                logger.info(f"蜜柑ID匹配成功: mikan_id={mikan_id} -> subscribe_id={mikan_map[mikan_id]}")
+                        except Exception as e:
+                            logger.warning(f"查询蜜柑映射失败: {e}")
+                    
+                    # 2. 智能标题匹配（如果蜜柑ID未匹配）
+                    if not matched:
+                        def normalize_title(t):
+                            # 去除标点符号和特殊字符，只保留字母数字和中文
+                            return re.sub(r'[^\w\s]', '', t).lower().strip()
+                        
+                        raw_title = a.get("title", "")
+                        title = normalize_title(raw_title)
+                        sub_names_normalized = {normalize_title(name): name for name in sub_names}
+                        if title and title in sub_names_normalized:
+                            a["subscribed"] = True
+                            matched = True
+                            logger.info(f"标题匹配成功: 原始='{raw_title}', 标准化='{title}' -> 订阅='{sub_names_normalized[title]}'")
+                        else:
+                            logger.info(f"标题匹配失败: 原始='{raw_title}', 标准化='{title}', 可用订阅标题: {list(sub_names_normalized.keys())[:5]}")
             finally:
                 db.close()
         except Exception as e:
@@ -740,6 +762,14 @@ class AnimeDiscovery(_PluginBase):
             logger.info(f"订阅结果: sid={sid}, msg={msg}")
             if sid:
                 self._cache = {}; self._cache_time = 0
+                # 保存蜜柑ID到本地映射表
+                if params.mikan_id:
+                    try:
+                        mikan_map = self.get_data("mikan_subscription_map") or {}
+                        mikan_map[params.mikan_id] = sid
+                        self.save_data("mikan_subscription_map", mikan_map)
+                    except Exception as e:
+                        logger.warning(f"保存蜜柑映射失败: {e}")
                 return {"success": True, "message": f"已订阅 {title}，{msg}"}
             else:
                 return {"success": False, "message": msg or "订阅失败"}
@@ -765,6 +795,15 @@ class AnimeDiscovery(_PluginBase):
                 db.commit()
                 if deleted:
                     self._cache = {}; self._cache_time = 0
+                    # 删除蜜柑ID映射
+                    if params.mikan_id:
+                        try:
+                            mikan_map = self.get_data("mikan_subscription_map") or {}
+                            if params.mikan_id in mikan_map:
+                                del mikan_map[params.mikan_id]
+                                self.save_data("mikan_subscription_map", mikan_map)
+                        except Exception as e:
+                            logger.warning(f"删除蜜柑映射失败: {e}")
                     return {"success": True, "message": f"已取消订阅: {title or tmdb_id}"}
                 else:
                     return {"success": False, "message": "未找到订阅记录"}
