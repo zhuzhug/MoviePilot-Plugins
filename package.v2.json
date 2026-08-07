@@ -44,11 +44,12 @@
     "name": "当季新番",
     "description": "发现当季新番，按日期分组，一键订阅追番。",
     "labels": "订阅",
-    "version": "2.3.5",
+    "version": "2.3.6",
     "icon": "mdi-play-circle",
     "author": "zhuzhug",
     "level": 1,
     "history": {
+      "v2.3.6": "修复蜜柑网址：从 mikanani.me 更新为 mikanime.tv，修正搜索链接格式",
       "v2.3.5": "优化新番通知格式：显示今天日期和播出时间描述",
       "v2.3.4": "修复刷新按钮URL认证错误，修复订阅检查类型异常，更新版本号",
       "v2.3.3": "自动刷新改为可配置Cron表达式，支持每天多次/自定义时间",
