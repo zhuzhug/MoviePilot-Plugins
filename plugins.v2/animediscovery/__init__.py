@@ -43,7 +43,7 @@ class AnimeDiscovery(_PluginBase):
     plugin_name = "当季新番"
     plugin_desc = "发现当季新番，按日期分组，一键订阅追番。"
     plugin_icon = "mdi-play-circle"
-    plugin_version = "2.9.0"
+    plugin_version = "2.14.3"
     plugin_label = "订阅"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "anime_discovery_"
@@ -288,6 +288,7 @@ class AnimeDiscovery(_PluginBase):
         ]
 
         # 渲染TV动画分组
+        logger.info(f"TV动画分组: dated={len(tv_dated)}, undated={len(tv_undated)}, total={tv_count}")
         if tv_dated or tv_undated:
             page.append({"component": "div", "props": {"class": "d-flex align-center mb-1 mt-2"}, "content": [
                 {"component": "VChip", "props": {"color": "primary", "variant": "flat", "size": "small", "class": "mr-2"}, "text": "TV动画"},
@@ -296,18 +297,48 @@ class AnimeDiscovery(_PluginBase):
             
             # 按星期分组
             for dk, animes in tv_dated.items():
+                logger.info(f"TV动画星期分组: {dk}, 数量={len(animes)}, 标题: {[a.get('title') for a in animes[:5]]}")
+                # 显示分组标题
                 page.append({"component": "div", "props": {"class": "d-flex align-center mb-1 mt-2"}, "content": [
                     {"component": "VChip", "props": {"color": "blue", "variant": "outlined", "size": "x-small", "class": "mr-2"}, "text": dk},
                     {"component": "div", "props": {"class": "text-caption text-grey"}, "text": f"{len(animes)} 部"},
                 ]})
+                # 每行显示2个卡片
                 cols = [self._build_anime_card(a, api_token) for a in animes]
-                if len(cols) > 1:
-                    page.append({"component": "VRow", "props": {"dense": True}, "content": [
-                        {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i]]} for i in range(0, len(cols), 2)
-                    ]})
-                elif cols:
-                    page.append({"component": "VRow", "props": {"dense": True}, "content": [
-                        {"component": "VCol", "props": {"cols": 12}, "content": [cols[0]]},
+                # 如果数量<=4，直接显示所有卡片
+                if len(cols) <= 4:
+                    for i in range(0, len(cols), 2):
+                        row_content = []
+                        # 第一个卡片
+                        row_content.append({"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i]]})
+                        # 第二个卡片（如果存在）
+                        if i + 1 < len(cols):
+                            row_content.append({"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i + 1]]})
+                        page.append({"component": "VRow", "props": {"dense": True}, "content": row_content})
+                else:
+                    # 显示前4个卡片
+                    for i in range(0, 4, 2):
+                        row_content = []
+                        row_content.append({"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i]]})
+                        if i + 1 < 4:
+                            row_content.append({"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i + 1]]})
+                        page.append({"component": "VRow", "props": {"dense": True}, "content": row_content})
+                    # 其余卡片折叠
+                    expansion_content = []
+                    for i in range(4, len(cols), 2):
+                        row_content = []
+                        row_content.append({"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i]]})
+                        if i + 1 < len(cols):
+                            row_content.append({"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i + 1]]})
+                        expansion_content.append({"component": "VRow", "props": {"dense": True}, "content": row_content})
+                    # 创建折叠面板
+                    page.append({"component": "VExpansionPanels", "props": {"variant": "accordion", "multiple": True}, "content": [
+                        {"component": "VExpansionPanel", "props": {}, "content": [
+                            {"component": "VExpansionPanelTitle", "props": {"class": "text-subtitle-2 d-flex align-center px-3 py-2"}, "content": [
+                                {"component": "VChip", "props": {"color": "blue", "variant": "flat", "size": "small", "class": "mr-2"}, "text": f"展开更多 ({len(cols) - 4} 部)"},
+                            ]},
+                            {"component": "VExpansionPanelText", "props": {"class": "pa-3"}, "content": expansion_content},
+                        ]},
                     ]})
             
             # 无日期的TV动画
@@ -317,13 +348,40 @@ class AnimeDiscovery(_PluginBase):
                     {"component": "div", "props": {"class": "text-caption text-grey"}, "text": f"{len(tv_undated)} 部"},
                 ]})
                 cols = [self._build_anime_card(a, api_token) for a in tv_undated]
-                if len(cols) > 1:
-                    page.append({"component": "VRow", "props": {"dense": True}, "content": [
-                        {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i]]} for i in range(0, len(cols), 2)
-                    ]})
-                elif cols:
-                    page.append({"component": "VRow", "props": {"dense": True}, "content": [
-                        {"component": "VCol", "props": {"cols": 12}, "content": [cols[0]]},
+                # 如果数量<=4，直接显示所有卡片
+                if len(cols) <= 4:
+                    for i in range(0, len(cols), 2):
+                        row_content = []
+                        # 第一个卡片
+                        row_content.append({"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i]]})
+                        # 第二个卡片（如果存在）
+                        if i + 1 < len(cols):
+                            row_content.append({"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i + 1]]})
+                        page.append({"component": "VRow", "props": {"dense": True}, "content": row_content})
+                else:
+                    # 显示前4个卡片
+                    for i in range(0, 4, 2):
+                        row_content = []
+                        row_content.append({"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i]]})
+                        if i + 1 < 4:
+                            row_content.append({"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i + 1]]})
+                        page.append({"component": "VRow", "props": {"dense": True}, "content": row_content})
+                    # 其余卡片折叠
+                    expansion_content = []
+                    for i in range(4, len(cols), 2):
+                        row_content = []
+                        row_content.append({"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i]]})
+                        if i + 1 < len(cols):
+                            row_content.append({"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i + 1]]})
+                        expansion_content.append({"component": "VRow", "props": {"dense": True}, "content": row_content})
+                    # 创建折叠面板
+                    page.append({"component": "VExpansionPanels", "props": {"variant": "accordion", "multiple": True}, "content": [
+                        {"component": "VExpansionPanel", "props": {}, "content": [
+                            {"component": "VExpansionPanelTitle", "props": {"class": "text-subtitle-2 d-flex align-center px-3 py-2"}, "content": [
+                                {"component": "VChip", "props": {"color": "grey", "variant": "flat", "size": "small", "class": "mr-2"}, "text": f"展开更多 ({len(cols) - 4} 部)"},
+                            ]},
+                            {"component": "VExpansionPanelText", "props": {"class": "pa-3"}, "content": expansion_content},
+                        ]},
                     ]})
         
         # 渲染电影/OVA/剧场版分组
@@ -336,19 +394,21 @@ class AnimeDiscovery(_PluginBase):
             
             # 按月份分组
             for dk, animes in movie_dated.items():
+                logger.info(f"电影月份分组: {dk}, 数量={len(animes)}, 标题: {[a.get('title') for a in animes[:5]]}")
                 page.append({"component": "div", "props": {"class": "d-flex align-center mb-1 mt-2"}, "content": [
                     {"component": "VChip", "props": {"color": "orange", "variant": "outlined", "size": "x-small", "class": "mr-2"}, "text": dk},
                     {"component": "div", "props": {"class": "text-caption text-grey"}, "text": f"{len(animes)} 部"},
                 ]})
                 cols = [self._build_anime_card(a, api_token) for a in animes]
-                if len(cols) > 1:
-                    page.append({"component": "VRow", "props": {"dense": True}, "content": [
-                        {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i]]} for i in range(0, len(cols), 2)
-                    ]})
-                elif cols:
-                    page.append({"component": "VRow", "props": {"dense": True}, "content": [
-                        {"component": "VCol", "props": {"cols": 12}, "content": [cols[0]]},
-                    ]})
+                # 每行显示2个卡片
+                for i in range(0, len(cols), 2):
+                    row_content = []
+                    # 第一个卡片
+                    row_content.append({"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i]]})
+                    # 第二个卡片（如果存在）
+                    if i + 1 < len(cols):
+                        row_content.append({"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i + 1]]})
+                    page.append({"component": "VRow", "props": {"dense": True}, "content": row_content})
             
             # 无日期的电影/OVA
             if movie_undated:
@@ -357,14 +417,15 @@ class AnimeDiscovery(_PluginBase):
                     {"component": "div", "props": {"class": "text-caption text-grey"}, "text": f"{len(movie_undated)} 部"},
                 ]})
                 cols = [self._build_anime_card(a, api_token) for a in movie_undated]
-                if len(cols) > 1:
-                    page.append({"component": "VRow", "props": {"dense": True}, "content": [
-                        {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i]]} for i in range(0, len(cols), 2)
-                    ]})
-                elif cols:
-                    page.append({"component": "VRow", "props": {"dense": True}, "content": [
-                        {"component": "VCol", "props": {"cols": 12}, "content": [cols[0]]},
-                    ]})
+                # 每行显示2个卡片
+                for i in range(0, len(cols), 2):
+                    row_content = []
+                    # 第一个卡片
+                    row_content.append({"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i]]})
+                    # 第二个卡片（如果存在）
+                    if i + 1 < len(cols):
+                        row_content.append({"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i + 1]]})
+                    page.append({"component": "VRow", "props": {"dense": True}, "content": row_content})
         
         return page
 
@@ -485,7 +546,7 @@ class AnimeDiscovery(_PluginBase):
                             except:
                                 return "未知"
                         
-                        titles = "\n".join([f"· {a.get('title')} ★{a.get('rating', 0)} | {get_air_desc(a.get('air_date', ''))}" for a in new_anime[:5]])
+                        titles = "\n".join([f"· {a.get('title')} ★{a.get('rating', 0)} | {get_air_desc(a.get('air_date', ''))}" for a in new_anime[:10]])
                         title_text = f"{today} 新番更新 (+{len(new_anime)})"
                         self.post_message(mtype=NotificationType.Manual, title=title_text, text=titles)
                         self._last_notify_date = today
@@ -556,7 +617,7 @@ class AnimeDiscovery(_PluginBase):
             if tv_resp:
                 tv_data = json.loads(tv_resp)
                 sl = self._get_season_label()
-                for item in tv_data.get("results", [])[:30]:
+                for item in tv_data.get("results", [])[:50]:
                     anime_list.append({"title": item.get("name", ""), "year": str(item.get("first_air_date", "")[:4]) if item.get("first_air_date") else "", "air_date": item.get("first_air_date", ""), "season": sl, "rating": round(item.get("vote_average", 0), 1), "poster": f"https://image.tmdb.org/t/p/w300{item.get('poster_path', '')}" if item.get("poster_path") else "", "overview": item.get("overview", ""), "tmdb_id": item.get("id", ""), "media_type": "tv", "subscribed": False})
             
             # 查询动画电影
@@ -564,7 +625,7 @@ class AnimeDiscovery(_PluginBase):
             movie_resp = ru.get("https://api.themoviedb.org/3/discover/movie", params=movie_params, timeout=30)
             if movie_resp:
                 movie_data = json.loads(movie_resp)
-                for item in movie_data.get("results", [])[:20]:
+                for item in movie_data.get("results", [])[:30]:
                     anime_list.append({"title": item.get("title", ""), "year": str(item.get("release_date", "")[:4]) if item.get("release_date") else "", "air_date": item.get("release_date", ""), "season": "", "rating": round(item.get("vote_average", 0), 1), "poster": f"https://image.tmdb.org/t/p/w300{item.get('poster_path', '')}" if item.get("poster_path") else "", "overview": item.get("overview", ""), "tmdb_id": item.get("id", ""), "media_type": "movie", "subscribed": False})
         except Exception as e:
             logger.error(f"TMDB 请求失败: {e}")
@@ -738,8 +799,9 @@ class AnimeDiscovery(_PluginBase):
         year = params.year
         tmdb_id = params.tmdb_id
         bangumi_id = params.bangumi_id
+        mikan_id = params.mikan_id
         if not title: return {"success": False, "message": "缺少标题"}
-        logger.info(f"收到订阅请求: title={title}, year={year}, tmdb_id={tmdb_id}, bangumi_id={bangumi_id}")
+        logger.info(f"收到订阅请求: title={title}, year={year}, tmdb_id={tmdb_id}, bangumi_id={bangumi_id}, mikan_id={mikan_id}")
         try:
             # 使用 MP 订阅系统，支持自动搜刮下载
             # 根据媒体类型选择订阅类型
@@ -772,6 +834,61 @@ class AnimeDiscovery(_PluginBase):
                         logger.warning(f"保存蜜柑映射失败: {e}")
                 return {"success": True, "message": f"已订阅 {title}，{msg}"}
             else:
+                # 订阅失败，尝试用标题搜索TMDB获取正确的TMDB ID
+                logger.info(f"订阅失败，尝试TMDB搜索: {title}")
+                try:
+                    # 搜索TMDB
+                    search_url = "https://api.themoviedb.org/3/search/multi"
+                    params = {
+                        "api_key": settings.TMDB_API_KEY,
+                        "language": "zh-CN",
+                        "query": title,
+                        "page": 1
+                    }
+                    ru = RequestUtils(proxies=settings.PROXY)
+                    resp = ru.get(search_url, params=params, timeout=10)
+                    if resp:
+                        data = json.loads(resp)
+                        results = data.get("results", [])
+                        logger.info(f"TMDB搜索结果: 标题='{title}', 找到{len(results)}个结果")
+                        # 查找最匹配的结果
+                        for result in results[:5]:
+                            result_title = result.get("name") or result.get("title", "")
+                            result_type = result.get("media_type", "")
+                            result_id = result.get("id")
+                            # 检查标题相似度
+                            if title.lower() in result_title.lower() or result_title.lower() in title.lower():
+                                logger.info(f"TMDB搜索到匹配: {result_title} (ID: {result_id}, 类型: {result_type})")
+                                # 根据类型确定订阅类型
+                                if result_type == "movie":
+                                    mtype = MediaType.MOVIE
+                                    season = None
+                                else:
+                                    mtype = MediaType.TV
+                                    season = 1
+                                # 重新订阅
+                                sid2, msg2 = SubscribeChain().add(
+                                    title=title,
+                                    year=year,
+                                    mtype=mtype,
+                                    tmdbid=result_id,
+                                    season=season,
+                                    message=True,
+                                )
+                                if sid2:
+                                    # 保存蜜柑ID映射
+                                    if params.mikan_id:
+                                        try:
+                                            mikan_map = self.get_data("mikan_subscription_map") or {}
+                                            mikan_map[params.mikan_id] = sid2
+                                            self.save_data("mikan_subscription_map", mikan_map)
+                                        except Exception as e:
+                                            logger.warning(f"保存蜜柑映射失败: {e}")
+                                    self._cache = {}; self._cache_time = 0
+                                    return {"success": True, "message": f"已订阅 {title}（通过TMDB搜索匹配），{msg2}"}
+                except Exception as e:
+                    logger.warning(f"TMDB搜索异常: {e}")
+                # 搜索失败，返回原始错误
                 return {"success": False, "message": msg or "订阅失败"}
         except Exception as e:
             logger.warning(f"订阅异常: {e}")
@@ -810,6 +927,7 @@ class AnimeDiscovery(_PluginBase):
             finally:
                 db.close()
         except Exception as e:
+            logger.error(f"订阅异常: {e}")
             return {"success": False, "message": str(e)}
 
     def stop_service(self) -> None:
