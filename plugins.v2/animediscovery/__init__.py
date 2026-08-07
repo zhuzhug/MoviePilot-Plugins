@@ -42,7 +42,7 @@ class AnimeDiscovery(_PluginBase):
     plugin_name = "当季新番"
     plugin_desc = "发现当季新番，按日期分组，一键订阅追番。"
     plugin_icon = "mdi-play-circle"
-    plugin_version = "2.3.8"
+    plugin_version = "2.4.1"
     plugin_label = "订阅"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "anime_discovery_"
@@ -181,35 +181,74 @@ class AnimeDiscovery(_PluginBase):
         if self._hide_subscribed:
             data = [a for a in data if not a.get("subscribed")]
 
-        # 分组：有日期的按星期分，无日期的归"蜜柑资源"
-        weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+        # 按媒体类型分组
         from collections import OrderedDict
-        dated: OrderedDict = OrderedDict()
-        undated = []
-        for anime in data:
+        tv_list = [a for a in data if a.get("media_type", "tv") == "tv"]
+        movie_list = [a for a in data if a.get("media_type", "tv") == "movie"]
+        
+        # TV动画按星期分组
+        weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+        tv_dated: OrderedDict = OrderedDict()
+        tv_undated = []
+        for anime in tv_list:
             ad = anime.get("air_date", "")
             try:
                 dt = datetime.strptime(ad, "%Y-%m-%d")
                 dk = weekdays[dt.weekday()]
-                dated.setdefault(dk, []).append(anime)
+                tv_dated.setdefault(dk, []).append(anime)
             except Exception:
-                undated.append(anime)
-
+                tv_undated.append(anime)
+        
+        # 按星期顺序排序
+        sorted_tv_dated: OrderedDict = OrderedDict()
+        for dk in weekdays:
+            if dk in tv_dated:
+                sorted_tv_dated[dk] = tv_dated[dk]
+        tv_dated = sorted_tv_dated
+        
+        # 电影/OVA/剧场版按日期分组（或简单列表）
+        movie_dated: OrderedDict = OrderedDict()
+        movie_undated = []
+        for anime in movie_list:
+            ad = anime.get("air_date", "")
+            try:
+                dt = datetime.strptime(ad, "%Y-%m-%d")
+                dk = dt.strftime("%Y年%m月")
+                movie_dated.setdefault(dk, []).append(anime)
+            except Exception:
+                movie_undated.append(anime)
+        
+        # 按月份从新到旧排序
+        sorted_movie_dated: OrderedDict = OrderedDict()
+        for dk in sorted(movie_dated.keys(), reverse=True):
+            sorted_movie_dated[dk] = movie_dated[dk]
+        movie_dated = sorted_movie_dated
+        
         total = len(data)
+        tv_count = len(tv_list)
+        movie_count = len(movie_list)
         sub_count = sum(1 for a in data if a.get("subscribed"))
 
         page = [
             # 统计
             {"component": "VRow", "props": {"class": "mb-2"}, "content": [
-                {"component": "VCol", "props": {"cols": 4}, "content": [
+                {"component": "VCol", "props": {"cols": 3}, "content": [
                     {"component": "VCard", "props": {"variant": "tonal", "color": "primary"}, "content": [
                         {"component": "VCardText", "props": {"class": "text-center py-2"}, "content": [
-                            {"component": "div", "props": {"class": "text-h5 font-weight-bold"}, "text": str(total)},
-                            {"component": "div", "props": {"class": "text-caption"}, "text": "当季新番"},
+                            {"component": "div", "props": {"class": "text-h5 font-weight-bold"}, "text": str(tv_count)},
+                            {"component": "div", "props": {"class": "text-caption"}, "text": "TV动画"},
                         ]},
                     ]},
                 ]},
-                {"component": "VCol", "props": {"cols": 4}, "content": [
+                {"component": "VCol", "props": {"cols": 3}, "content": [
+                    {"component": "VCard", "props": {"variant": "tonal", "color": "orange"}, "content": [
+                        {"component": "VCardText", "props": {"class": "text-center py-2"}, "content": [
+                            {"component": "div", "props": {"class": "text-h5 font-weight-bold"}, "text": str(movie_count)},
+                            {"component": "div", "props": {"class": "text-caption"}, "text": "电影/OVA"},
+                        ]},
+                    ]},
+                ]},
+                {"component": "VCol", "props": {"cols": 3}, "content": [
                     {"component": "VCard", "props": {"variant": "tonal", "color": "success"}, "content": [
                         {"component": "VCardText", "props": {"class": "text-center py-2"}, "content": [
                             {"component": "div", "props": {"class": "text-h5 font-weight-bold"}, "text": str(sub_count)},
@@ -217,7 +256,7 @@ class AnimeDiscovery(_PluginBase):
                         ]},
                     ]},
                 ]},
-                {"component": "VCol", "props": {"cols": 4}, "content": [
+                {"component": "VCol", "props": {"cols": 3}, "content": [
                     {"component": "VCard", "props": {"variant": "tonal", "color": "warning"}, "content": [
                         {"component": "VCardText", "props": {"class": "text-center py-2"}, "content": [
                             {"component": "div", "props": {"class": "text-h5 font-weight-bold"}, "text": str(total - sub_count)},
@@ -241,39 +280,85 @@ class AnimeDiscovery(_PluginBase):
             ]},
         ]
 
-        # 按星期分组
-        for dk, animes in dated.items():
+        # 渲染TV动画分组
+        if tv_dated or tv_undated:
             page.append({"component": "div", "props": {"class": "d-flex align-center mb-1 mt-2"}, "content": [
-                {"component": "VChip", "props": {"color": "primary", "variant": "flat", "size": "small", "class": "mr-2"}, "text": dk},
-                {"component": "div", "props": {"class": "text-caption text-grey"}, "text": f"{len(animes)} 部"},
+                {"component": "VChip", "props": {"color": "primary", "variant": "flat", "size": "small", "class": "mr-2"}, "text": "TV动画"},
+                {"component": "div", "props": {"class": "text-caption text-grey"}, "text": f"{tv_count} 部"},
             ]})
-            cols = [self._build_anime_card(a, api_token) for a in animes]
-            if len(cols) > 1:
-                page.append({"component": "VRow", "props": {"dense": True}, "content": [
-                    {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i]]} for i in range(0, len(cols), 2)
+            
+            # 按星期分组
+            for dk, animes in tv_dated.items():
+                page.append({"component": "div", "props": {"class": "d-flex align-center mb-1 mt-2"}, "content": [
+                    {"component": "VChip", "props": {"color": "blue", "variant": "outlined", "size": "x-small", "class": "mr-2"}, "text": dk},
+                    {"component": "div", "props": {"class": "text-caption text-grey"}, "text": f"{len(animes)} 部"},
                 ]})
-            elif cols:
-                page.append({"component": "VRow", "props": {"dense": True}, "content": [
-                    {"component": "VCol", "props": {"cols": 12}, "content": [cols[0]]},
+                cols = [self._build_anime_card(a, api_token) for a in animes]
+                if len(cols) > 1:
+                    page.append({"component": "VRow", "props": {"dense": True}, "content": [
+                        {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i]]} for i in range(0, len(cols), 2)
+                    ]})
+                elif cols:
+                    page.append({"component": "VRow", "props": {"dense": True}, "content": [
+                        {"component": "VCol", "props": {"cols": 12}, "content": [cols[0]]},
+                    ]})
+            
+            # 无日期的TV动画
+            if tv_undated:
+                page.append({"component": "div", "props": {"class": "d-flex align-center mb-1 mt-2"}, "content": [
+                    {"component": "VChip", "props": {"color": "grey", "variant": "outlined", "size": "x-small", "class": "mr-2"}, "text": "其他"},
+                    {"component": "div", "props": {"class": "text-caption text-grey"}, "text": f"{len(tv_undated)} 部"},
                 ]})
-
-        # 蜜柑独有番（无播出日期）放在最后
-        if undated:
+                cols = [self._build_anime_card(a, api_token) for a in tv_undated]
+                if len(cols) > 1:
+                    page.append({"component": "VRow", "props": {"dense": True}, "content": [
+                        {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i]]} for i in range(0, len(cols), 2)
+                    ]})
+                elif cols:
+                    page.append({"component": "VRow", "props": {"dense": True}, "content": [
+                        {"component": "VCol", "props": {"cols": 12}, "content": [cols[0]]},
+                    ]})
+        
+        # 渲染电影/OVA/剧场版分组
+        if movie_dated or movie_undated:
             page.append({"component": "VDivider", "props": {"class": "my-3"}})
-            page.append({"component": "div", "props": {"class": "d-flex align-center mb-1"}, "content": [
-                {"component": "VChip", "props": {"color": "orange", "variant": "flat", "size": "small", "class": "mr-2"}, "text": "蜜柑资源"},
-                {"component": "div", "props": {"class": "text-caption text-grey"}, "text": f"{len(undated)} 部（仅在蜜柑有资源）"},
+            page.append({"component": "div", "props": {"class": "d-flex align-center mb-1 mt-2"}, "content": [
+                {"component": "VChip", "props": {"color": "orange", "variant": "flat", "size": "small", "class": "mr-2"}, "text": "电影/OVA/剧场版"},
+                {"component": "div", "props": {"class": "text-caption text-grey"}, "text": f"{movie_count} 部"},
             ]})
-            cols = [self._build_anime_card(a, api_token) for a in undated]
-            if len(cols) > 1:
-                page.append({"component": "VRow", "props": {"dense": True}, "content": [
-                    {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i]]} for i in range(0, len(cols), 2)
+            
+            # 按月份分组
+            for dk, animes in movie_dated.items():
+                page.append({"component": "div", "props": {"class": "d-flex align-center mb-1 mt-2"}, "content": [
+                    {"component": "VChip", "props": {"color": "orange", "variant": "outlined", "size": "x-small", "class": "mr-2"}, "text": dk},
+                    {"component": "div", "props": {"class": "text-caption text-grey"}, "text": f"{len(animes)} 部"},
                 ]})
-            elif cols:
-                page.append({"component": "VRow", "props": {"dense": True}, "content": [
-                    {"component": "VCol", "props": {"cols": 12}, "content": [cols[0]]},
+                cols = [self._build_anime_card(a, api_token) for a in animes]
+                if len(cols) > 1:
+                    page.append({"component": "VRow", "props": {"dense": True}, "content": [
+                        {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i]]} for i in range(0, len(cols), 2)
+                    ]})
+                elif cols:
+                    page.append({"component": "VRow", "props": {"dense": True}, "content": [
+                        {"component": "VCol", "props": {"cols": 12}, "content": [cols[0]]},
+                    ]})
+            
+            # 无日期的电影/OVA
+            if movie_undated:
+                page.append({"component": "div", "props": {"class": "d-flex align-center mb-1 mt-2"}, "content": [
+                    {"component": "VChip", "props": {"color": "grey", "variant": "outlined", "size": "x-small", "class": "mr-2"}, "text": "其他"},
+                    {"component": "div", "props": {"class": "text-caption text-grey"}, "text": f"{len(movie_undated)} 部"},
                 ]})
-
+                cols = [self._build_anime_card(a, api_token) for a in movie_undated]
+                if len(cols) > 1:
+                    page.append({"component": "VRow", "props": {"dense": True}, "content": [
+                        {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i]]} for i in range(0, len(cols), 2)
+                    ]})
+                elif cols:
+                    page.append({"component": "VRow", "props": {"dense": True}, "content": [
+                        {"component": "VCol", "props": {"cols": 12}, "content": [cols[0]]},
+                    ]})
+        
         return page
 
     def _build_anime_card(self, anime: Dict[str, Any], api_token: str) -> dict:
