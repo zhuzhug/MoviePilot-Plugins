@@ -41,7 +41,7 @@ class AnimeDiscovery(_PluginBase):
     plugin_name = "当季新番"
     plugin_desc = "发现当季新番，按日期分组，一键订阅追番。"
     plugin_icon = "mdi-play-circle"
-    plugin_version = "2.3.5"
+    plugin_version = "2.3.6"
     plugin_label = "订阅"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "anime_discovery_"
@@ -320,7 +320,7 @@ class AnimeDiscovery(_PluginBase):
                             {"component": "VBtn", "props": {
                                 "size": "x-small", "variant": "text", "color": "orange",
                                 "prepend-icon": "mdi-database-search", "target": "_blank",
-                                "href": anime.get("mikan_link") or f"https://mikanime.tv/Rss/Search?searchText={quote(title)}",
+                                "href": anime.get("mikan_link") or f"https://mikanime.tv/Home/Search?searchstr={quote(title)}",
                             }, "text": "蜜柑"},
                         ]},
                         {"component": "div", "props": {"class": "text-caption text-grey mt-1", "style": "line-height:1.4;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden"},
@@ -477,7 +477,7 @@ class AnimeDiscovery(_PluginBase):
         anime_list = []
         try:
             ru = RequestUtils(proxies=settings.PROXY)
-            resp = ru.get("https://mikanani.me/", timeout=30)
+            resp = ru.get("https://mikanime.tv/", timeout=30)
             if not resp: return []
             pattern = r'<a[^>]*href="(/Home/Bangumi/\d+)"[^>]*class="an-text"[^>]*title="([^"]*)"'
             matches = re.findall(pattern, resp)
@@ -488,7 +488,7 @@ class AnimeDiscovery(_PluginBase):
                 title = html.unescape(raw_title).strip()
                 if not title or title in seen: continue
                 seen.add(title)
-                anime_list.append({"title": title, "year": year, "air_date": "", "season": sl, "rating": 0, "poster": "", "overview": f"蜜柑资源 · {title}", "tmdb_id": "", "bangumi_id": "", "mikan_link": f"https://mikanani.me{link_path}", "subscribed": False})
+                anime_list.append({"title": title, "year": year, "air_date": "", "season": sl, "rating": 0, "poster": "", "overview": f"蜜柑资源 · {title}", "tmdb_id": "", "bangumi_id": "", "mikan_link": f"https://mikanime.tv{link_path}", "subscribed": False})
         except Exception as e:
             logger.error(f"蜜柑请求失败: {e}")
         return anime_list
