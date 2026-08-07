@@ -33,6 +33,7 @@ class SubscribeParams(BaseModel):
     year: str = Field(default="", description="年份")
     tmdb_id: Optional[Union[str, int]] = Field(default=None, description="TMDB ID")
     bangumi_id: Optional[Union[str, int]] = Field(default=None, description="Bangumi ID")
+    media_type: str = Field(default="tv", description="媒体类型: tv 或 movie")
 
 
 class AnimeDiscovery(_PluginBase):
@@ -41,7 +42,7 @@ class AnimeDiscovery(_PluginBase):
     plugin_name = "当季新番"
     plugin_desc = "发现当季新番，按日期分组，一键订阅追番。"
     plugin_icon = "mdi-play-circle"
-    plugin_version = "2.3.6"
+    plugin_version = "2.3.8"
     plugin_label = "订阅"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "anime_discovery_"
@@ -292,7 +293,7 @@ class AnimeDiscovery(_PluginBase):
             "color": "success" if subscribed else "primary", "disabled": subscribed,
         }, "text": "已订阅" if subscribed else "订阅"}
         if not subscribed:
-            params = {"title": title, "year": anime.get("year", "")}
+            params = {"title": title, "year": anime.get("year", ""), "media_type": anime.get("media_type", "tv")}
             if tmdb_id: params["tmdb_id"] = tmdb_id
             if bangumi_id: params["bangumi_id"] = bangumi_id
             subscribe_btn["events"] = {"click": {
@@ -444,14 +445,24 @@ class AnimeDiscovery(_PluginBase):
         anime_list = []
         try:
             gte, lte = self._get_season_range()
-            params = {"api_key": settings.TMDB_API_KEY, "language": "zh-CN", "with_genres": "16", "with_original_language": "ja", "first_air_date.gte": gte, "first_air_date.lte": lte, "sort_by": "popularity.desc", "page": 1}
             ru = RequestUtils(proxies=settings.PROXY)
-            resp = ru.get("https://api.themoviedb.org/3/discover/tv", params=params, timeout=30)
-            if resp:
-                data = json.loads(resp)
+            
+            # 查询TV动画
+            tv_params = {"api_key": settings.TMDB_API_KEY, "language": "zh-CN", "with_genres": "16", "with_original_language": "ja", "first_air_date.gte": gte, "first_air_date.lte": lte, "sort_by": "popularity.desc", "page": 1}
+            tv_resp = ru.get("https://api.themoviedb.org/3/discover/tv", params=tv_params, timeout=30)
+            if tv_resp:
+                tv_data = json.loads(tv_resp)
                 sl = self._get_season_label()
-                for item in data.get("results", [])[:30]:
-                    anime_list.append({"title": item.get("name", ""), "year": str(item.get("first_air_date", "")[:4]) if item.get("first_air_date") else "", "air_date": item.get("first_air_date", ""), "season": sl, "rating": round(item.get("vote_average", 0), 1), "poster": f"https://image.tmdb.org/t/p/w300{item.get('poster_path', '')}" if item.get("poster_path") else "", "overview": item.get("overview", ""), "tmdb_id": item.get("id", ""), "subscribed": False})
+                for item in tv_data.get("results", [])[:30]:
+                    anime_list.append({"title": item.get("name", ""), "year": str(item.get("first_air_date", "")[:4]) if item.get("first_air_date") else "", "air_date": item.get("first_air_date", ""), "season": sl, "rating": round(item.get("vote_average", 0), 1), "poster": f"https://image.tmdb.org/t/p/w300{item.get('poster_path', '')}" if item.get("poster_path") else "", "overview": item.get("overview", ""), "tmdb_id": item.get("id", ""), "media_type": "tv", "subscribed": False})
+            
+            # 查询动画电影
+            movie_params = {"api_key": settings.TMDB_API_KEY, "language": "zh-CN", "with_genres": "16", "with_original_language": "ja", "release_date.gte": gte, "release_date.lte": lte, "sort_by": "popularity.desc", "page": 1}
+            movie_resp = ru.get("https://api.themoviedb.org/3/discover/movie", params=movie_params, timeout=30)
+            if movie_resp:
+                movie_data = json.loads(movie_resp)
+                for item in movie_data.get("results", [])[:20]:
+                    anime_list.append({"title": item.get("title", ""), "year": str(item.get("release_date", "")[:4]) if item.get("release_date") else "", "air_date": item.get("release_date", ""), "season": "", "rating": round(item.get("vote_average", 0), 1), "poster": f"https://image.tmdb.org/t/p/w300{item.get('poster_path', '')}" if item.get("poster_path") else "", "overview": item.get("overview", ""), "tmdb_id": item.get("id", ""), "media_type": "movie", "subscribed": False})
         except Exception as e:
             logger.error(f"TMDB 请求失败: {e}")
         return anime_list
@@ -558,7 +569,7 @@ class AnimeDiscovery(_PluginBase):
             db = ScopedSession()
             try:
                 # R=运行中, N=新建待调度，都算已订阅
-                subs = db.query(Subscribe).filter(Subscribe.state.in_(["R", "N"]), Subscribe.type == "电视剧").all()
+                subs = db.query(Subscribe).filter(Subscribe.state.in_(["R", "N"]), Subscribe.type.in_(["电视剧", "电影"])).all()
                 sub_ids = {s.tmdbid for s in subs if s.tmdbid}
                 sub_names = {s.name for s in subs if s.name}
                 for a in anime_list:
@@ -599,13 +610,21 @@ class AnimeDiscovery(_PluginBase):
         logger.info(f"收到订阅请求: title={title}, year={year}, tmdb_id={tmdb_id}, bangumi_id={bangumi_id}")
         try:
             # 使用 MP 订阅系统，支持自动搜刮下载
+            # 根据媒体类型选择订阅类型
+            if params.media_type == "movie":
+                mtype = MediaType.MOVIE
+                season = None
+            else:
+                mtype = MediaType.TV
+                season = 1
+            
             sid, msg = SubscribeChain().add(
                 title=title,
                 year=year,
-                mtype=MediaType.TV,
+                mtype=mtype,
                 tmdbid=int(tmdb_id) if tmdb_id else None,
                 bangumiid=int(bangumi_id) if bangumi_id else None,
-                season=1,
+                season=season,
                 message=True,
             )
             logger.info(f"订阅结果: sid={sid}, msg={msg}")
