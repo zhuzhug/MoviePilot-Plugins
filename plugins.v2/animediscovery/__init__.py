@@ -41,7 +41,7 @@ class AnimeDiscovery(_PluginBase):
     plugin_name = "当季新番"
     plugin_desc = "发现当季新番，按日期分组，一键订阅追番。"
     plugin_icon = "mdi-play-circle"
-    plugin_version = "2.3.3"
+    plugin_version = "2.3.4"
     plugin_label = "订阅"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "anime_discovery_"
@@ -155,7 +155,7 @@ class AnimeDiscovery(_PluginBase):
         if not self._enabled:
             return None
         api_token = settings.API_TOKEN
-        refresh_api = f"plugin/AnimeDiscovery/refresh?token={api_token}"
+        refresh_api = f"plugin/AnimeDiscovery/refresh?apikey={api_token}"
         data = self._get_anime_list()
         if not data:
             return [
@@ -543,10 +543,16 @@ class AnimeDiscovery(_PluginBase):
                 sub_names = {s.name for s in subs if s.name}
                 for a in anime_list:
                     # 按 tmdb_id 匹配
-                    if a.get("tmdb_id") and int(a["tmdb_id"]) in sub_ids:
-                        a["subscribed"] = True
+                    tmdb_id = a.get("tmdb_id")
+                    if tmdb_id:
+                        try:
+                            if int(tmdb_id) in sub_ids:
+                                a["subscribed"] = True
+                                continue
+                        except (ValueError, TypeError):
+                            pass
                     # 按标题匹配（Bangumi/蜜柑来源无 tmdb_id）
-                    elif a.get("title") in sub_names:
+                    if a.get("title") in sub_names:
                         a["subscribed"] = True
             finally:
                 db.close()
