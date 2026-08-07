@@ -41,7 +41,7 @@ class AnimeDiscovery(_PluginBase):
     plugin_name = "当季新番"
     plugin_desc = "发现当季新番，按日期分组，一键订阅追番。"
     plugin_icon = "mdi-play-circle"
-    plugin_version = "2.3.4"
+    plugin_version = "2.3.5"
     plugin_label = "订阅"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "anime_discovery_"
@@ -362,8 +362,28 @@ class AnimeDiscovery(_PluginBase):
                     saved_titles = set(saved_list)
                     new_anime = [a for a in anime_list if a.get("title") and a["title"] not in saved_titles]
                     if new_anime:
-                        titles = "\n".join([f"· {a.get('title')} ★{a.get('rating', 0)}" for a in new_anime[:5]])
-                        self.post_message(mtype=NotificationType.Manual, title="当季新番更新", text=f"发现 {len(new_anime)} 部新番:\n{titles}")
+                        def get_air_desc(ad):
+                            if not ad:
+                                return "未知"
+                            try:
+                                ad_date = datetime.strptime(ad[:10], "%Y-%m-%d").date()
+                                today_date = datetime.now().date()
+                                diff = (ad_date - today_date).days
+                                if diff == 0:
+                                    return "今天播出"
+                                elif diff == 1:
+                                    return "明天"
+                                elif 2 <= diff <= 6:
+                                    weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+                                    return weekdays[ad_date.weekday()]
+                                else:
+                                    return ad_date.strftime("%m-%d")
+                            except:
+                                return "未知"
+                        
+                        titles = "\n".join([f"· {a.get('title')} ★{a.get('rating', 0)} | {get_air_desc(a.get('air_date', ''))}" for a in new_anime[:5]])
+                        title_text = f"{today} 新番更新 (+{len(new_anime)})"
+                        self.post_message(mtype=NotificationType.Manual, title=title_text, text=titles)
                         self._last_notify_date = today
                         try:
                             self.save_data("last_notify_date", today)
