@@ -42,7 +42,7 @@ class AnimeDiscovery(_PluginBase):
     plugin_name = "当季新番"
     plugin_desc = "发现当季新番，按日期分组，一键订阅追番。"
     plugin_icon = "mdi-play-circle"
-    plugin_version = "2.4.1"
+    plugin_version = "2.7.0"
     plugin_label = "订阅"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "anime_discovery_"
@@ -67,6 +67,7 @@ class AnimeDiscovery(_PluginBase):
         self._enabled = False
         self._data_source = "auto"
         self._min_rating = 0.0
+        self._min_year = 0
         self._auto_refresh = ""
         self._notify_new = False
         self._last_notify_date = ""
@@ -75,6 +76,7 @@ class AnimeDiscovery(_PluginBase):
         self._enabled = bool(config.get("enabled"))
         self._data_source = str(config.get("data_source") or "auto")
         self._min_rating = float(config.get("min_rating") or 0.0)
+        self._min_year = int(config.get("min_year") or 0)
         self._auto_refresh = str(config.get("auto_refresh") or "")
         self._notify_new = bool(config.get("notify_new"))
 
@@ -99,6 +101,7 @@ class AnimeDiscovery(_PluginBase):
         return [
             {"path": "/refresh", "endpoint": self._refresh_data, "methods": ["GET"], "summary": "刷新数据", "auth": "bear"},
             {"path": "/subscribe", "endpoint": self._subscribe_anime, "methods": ["POST"], "summary": "订阅番剧", "auth": "bear"},
+            {"path": "/unsubscribe", "endpoint": self._unsubscribe_anime, "methods": ["POST"], "summary": "取消订阅", "auth": "bear"},
         ]
 
     def get_service(self) -> List[Dict[str, Any]]:
@@ -133,6 +136,9 @@ class AnimeDiscovery(_PluginBase):
                     {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
                         {"component": "VTextField", "props": {"model": "min_rating", "label": "最低评分", "type": "number", "hint": "0=全部"}},
                     ]},
+                    {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
+                        {"component": "VTextField", "props": {"model": "min_year", "label": "最早年份", "type": "number", "hint": "0=全部，如2010"}},
+                    ]},
                 ]},
                 {"component": "VRow", "content": [
                     {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
@@ -148,7 +154,7 @@ class AnimeDiscovery(_PluginBase):
                     ]},
                 ]},
             ]}
-        ], {"enabled": False, "data_source": "auto", "min_rating": 0.0, "auto_refresh": "", "notify_new": False}
+        ], {"enabled": False, "data_source": "auto", "min_rating": 0.0, "min_year": 0, "auto_refresh": "", "notify_new": False}
 
     # ==================== 页面渲染 ====================
 
@@ -375,12 +381,20 @@ class AnimeDiscovery(_PluginBase):
         subscribe_btn = {"component": "VBtn", "props": {
             "size": "x-small", "variant": "tonal",
             "prepend-icon": "mdi-check" if subscribed else "mdi-plus",
-            "color": "success" if subscribed else "primary", "disabled": subscribed,
+            "color": "success" if subscribed else "primary",
         }, "text": "已订阅" if subscribed else "订阅"}
-        if not subscribed:
-            params = {"title": title, "year": anime.get("year", ""), "media_type": anime.get("media_type", "tv")}
-            if tmdb_id: params["tmdb_id"] = tmdb_id
-            if bangumi_id: params["bangumi_id"] = bangumi_id
+        params = {"title": title, "year": anime.get("year", ""), "media_type": anime.get("media_type", "tv")}
+        if tmdb_id: params["tmdb_id"] = tmdb_id
+        if bangumi_id: params["bangumi_id"] = bangumi_id
+        
+        if subscribed:
+            # 已订阅状态，点击取消订阅
+            subscribe_btn["events"] = {"click": {
+                "api": f"plugin/AnimeDiscovery/unsubscribe?apikey={api_token}",
+                "method": "post", "params": params,
+            }}
+        else:
+            # 未订阅状态，点击订阅
             subscribe_btn["events"] = {"click": {
                 "api": f"plugin/AnimeDiscovery/subscribe?apikey={api_token}",
                 "method": "post", "params": params,
@@ -436,6 +450,8 @@ class AnimeDiscovery(_PluginBase):
             self._check_subscriptions(anime_list)
             if self._min_rating > 0:
                 anime_list = [a for a in anime_list if a.get("rating", 0) >= self._min_rating]
+            if self._min_year > 0:
+                anime_list = [a for a in anime_list if int(a.get("year", "0") or "0") >= self._min_year]
 
             # 新番通知（每天最多推送一次）
             if self._notify_new:
@@ -667,9 +683,18 @@ class AnimeDiscovery(_PluginBase):
                                 continue
                         except (ValueError, TypeError):
                             pass
-                    # 按标题匹配（Bangumi/蜜柑来源无 tmdb_id）
-                    if a.get("title") in sub_names:
+                    # 按标题匹配（Bangumi/蜜柑来源无 tmdb_id），智能匹配（忽略标点符号、空格、大小写）
+                    def normalize_title(t):
+                        # 去除标点符号和特殊字符，只保留字母数字和中文
+                        return re.sub(r'[^\w\s]', '', t).lower().strip()
+                    
+                    title = normalize_title(a.get("title", ""))
+                    sub_names_normalized = {normalize_title(name): name for name in sub_names}
+                    if title and title in sub_names_normalized:
                         a["subscribed"] = True
+                        logger.info(f"标题匹配成功: {title} -> {sub_names_normalized[title]}")
+                    else:
+                        logger.info(f"标题匹配失败: {title}, 可用订阅标题: {list(sub_names_normalized.keys())[:5]}")
             finally:
                 db.close()
         except Exception as e:
@@ -720,6 +745,32 @@ class AnimeDiscovery(_PluginBase):
                 return {"success": False, "message": msg or "订阅失败"}
         except Exception as e:
             logger.warning(f"订阅异常: {e}")
+            return {"success": False, "message": str(e)}
+
+    def _unsubscribe_anime(self, params: SubscribeParams) -> dict:
+        title = params.title
+        tmdb_id = params.tmdb_id
+        if not title and not tmdb_id:
+            return {"success": False, "message": "缺少标题或TMDB ID"}
+        try:
+            from app.db import ScopedSession
+            from app.db.models.subscribe import Subscribe
+            db = ScopedSession()
+            try:
+                # 根据tmdb_id或标题删除订阅
+                if tmdb_id:
+                    deleted = db.query(Subscribe).filter(Subscribe.tmdbid == int(tmdb_id)).delete()
+                else:
+                    deleted = db.query(Subscribe).filter(Subscribe.name == title).delete()
+                db.commit()
+                if deleted:
+                    self._cache = {}; self._cache_time = 0
+                    return {"success": True, "message": f"已取消订阅: {title or tmdb_id}"}
+                else:
+                    return {"success": False, "message": "未找到订阅记录"}
+            finally:
+                db.close()
+        except Exception as e:
             return {"success": False, "message": str(e)}
 
     def stop_service(self) -> None:
