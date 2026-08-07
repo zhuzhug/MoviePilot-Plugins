@@ -10,17 +10,29 @@ import json
 import re
 import time
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.parse import quote
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+from fastapi import Request
+from pydantic import BaseModel, Field
+from app.chain.subscribe import SubscribeChain
 from app.core.config import settings
 from app.log import logger
+from app.schemas import MediaType
 from app.plugins import _PluginBase
 from app.schemas import NotificationType
 from app.utils.http import RequestUtils
+
+
+class SubscribeParams(BaseModel):
+    """订阅参数"""
+    title: str = Field(default="", description="标题")
+    year: str = Field(default="", description="年份")
+    tmdb_id: Optional[Union[str, int]] = Field(default=None, description="TMDB ID")
+    bangumi_id: Optional[Union[str, int]] = Field(default=None, description="Bangumi ID")
 
 
 class AnimeDiscovery(_PluginBase):
@@ -29,7 +41,7 @@ class AnimeDiscovery(_PluginBase):
     plugin_name = "当季新番"
     plugin_desc = "发现当季新番，按日期分组，一键订阅追番。"
     plugin_icon = "mdi-play-circle"
-    plugin_version = "2.3.0"
+    plugin_version = "2.3.2"
     plugin_label = "订阅"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "anime_discovery_"
@@ -91,7 +103,7 @@ class AnimeDiscovery(_PluginBase):
     def get_service(self) -> List[Dict[str, Any]]:
         if not self._auto_refresh:
             return []
-        return [{"id": "AnimeDiscoveryRefresh", "name": "当季新番自动刷新", "trigger": "cron", "cron": "0 10 * * *", "func": self._scheduled_refresh, "kwargs": {}}]
+        return [{"id": "AnimeDiscoveryRefresh", "name": "当季新番自动刷新", "trigger": CronTrigger.from_crontab("0 10 * * *"), "func": self._scheduled_refresh, "kwargs": {}}]
 
     def get_form(self) -> Tuple[Optional[List[dict]], Dict[str, Any]]:
         return [
@@ -259,6 +271,7 @@ class AnimeDiscovery(_PluginBase):
         overview = anime.get("overview", "")[:80]
         air_date = anime.get("air_date", "")
         tmdb_id = anime.get("tmdb_id", "")
+        bangumi_id = anime.get("bangumi_id", "")
         subscribed = anime.get("subscribed", False)
         rating_color = "success" if rating >= 7.0 else ("warning" if rating >= 5.0 else "grey")
 
@@ -267,10 +280,13 @@ class AnimeDiscovery(_PluginBase):
             "prepend-icon": "mdi-check" if subscribed else "mdi-plus",
             "color": "success" if subscribed else "primary", "disabled": subscribed,
         }, "text": "已订阅" if subscribed else "订阅"}
-        if not subscribed and tmdb_id:
+        if not subscribed:
+            params = {"title": title, "year": anime.get("year", "")}
+            if tmdb_id: params["tmdb_id"] = tmdb_id
+            if bangumi_id: params["bangumi_id"] = bangumi_id
             subscribe_btn["events"] = {"click": {
                 "api": f"plugin/AnimeDiscovery/subscribe?apikey={api_token}",
-                "method": "post", "params": {"tmdb_id": tmdb_id, "title": title, "year": anime.get("year", "")},
+                "method": "post", "params": params,
             }}
 
         return {"component": "VCard", "props": {"variant": "outlined", "class": "mb-2"}, "content": [
@@ -510,10 +526,16 @@ class AnimeDiscovery(_PluginBase):
             from app.db.models.subscribe import Subscribe
             db = ScopedSession()
             try:
-                subs = db.query(Subscribe).filter(Subscribe.state == "R", Subscribe.type == "电视剧").all()
+                # R=运行中, N=新建待调度，都算已订阅
+                subs = db.query(Subscribe).filter(Subscribe.state.in_(["R", "N"]), Subscribe.type == "电视剧").all()
                 sub_ids = {s.tmdbid for s in subs if s.tmdbid}
+                sub_names = {s.name for s in subs if s.name}
                 for a in anime_list:
+                    # 按 tmdb_id 匹配
                     if a.get("tmdb_id") and int(a["tmdb_id"]) in sub_ids:
+                        a["subscribed"] = True
+                    # 按标题匹配（Bangumi/蜜柑来源无 tmdb_id）
+                    elif a.get("title") in sub_names:
                         a["subscribed"] = True
             finally:
                 db.close()
@@ -531,24 +553,32 @@ class AnimeDiscovery(_PluginBase):
         self._cache = {}; self._cache_time = 0
         self._get_anime_list()
 
-    def _subscribe_anime(self, tmdb_id: str = "", title: str = "", year: str = "") -> dict:
+    def _subscribe_anime(self, params: SubscribeParams) -> dict:
+        title = params.title
+        year = params.year
+        tmdb_id = params.tmdb_id
+        bangumi_id = params.bangumi_id
         if not title: return {"success": False, "message": "缺少标题"}
+        logger.info(f"收到订阅请求: title={title}, year={year}, tmdb_id={tmdb_id}, bangumi_id={bangumi_id}")
         try:
-            from app.db import ScopedSession
-            from app.db.models.subscribe import Subscribe
-            db = ScopedSession()
-            try:
-                if tmdb_id:
-                    ex = db.query(Subscribe).filter(Subscribe.tmdbid == str(tmdb_id)).first()
-                    if ex: return {"success": False, "message": "已订阅"}
-                db.add(Subscribe(name=title, year=year, type="电视剧", tmdbid=int(tmdb_id) if tmdb_id else None, season=1, state="R"))
-                db.commit()
+            # 使用 MP 订阅系统，支持自动搜刮下载
+            sid, msg = SubscribeChain().add(
+                title=title,
+                year=year,
+                mtype=MediaType.TV,
+                tmdbid=int(tmdb_id) if tmdb_id else None,
+                bangumiid=int(bangumi_id) if bangumi_id else None,
+                season=1,
+                message=True,
+            )
+            logger.info(f"订阅结果: sid={sid}, msg={msg}")
+            if sid:
                 self._cache = {}; self._cache_time = 0
-                self.post_message(mtype=NotificationType.Manual, title="新番订阅成功", text=f"已订阅：{title} ({year})")
-                return {"success": True, "message": f"已订阅 {title}"}
-            finally:
-                db.close()
+                return {"success": True, "message": f"已订阅 {title}，{msg}"}
+            else:
+                return {"success": False, "message": msg or "订阅失败"}
         except Exception as e:
+            logger.warning(f"订阅异常: {e}")
             return {"success": False, "message": str(e)}
 
     def stop_service(self) -> None:
