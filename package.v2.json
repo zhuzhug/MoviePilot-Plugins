@@ -44,11 +44,12 @@
     "name": "当季新番",
     "description": "发现当季新番，AI 增强简介，一键订阅追番。",
     "labels": "订阅",
-    "version": "2.3.2",
+    "version": "2.3.3",
     "icon": "mdi-play-circle",
     "author": "zhuzhug",
     "level": 1,
     "history": {
+      "v2.3.3": "自动刷新改为可配置Cron表达式，支持每天多次/自定义时间",
       "v2.3.2": "修复订阅状态检测：新建订阅(N状态)也能正确显示已订阅；SubscribeParams兼容整数tmdb_id",
       "v2.3.1": "修复订阅按钮点击无响应问题，改用 Pydantic 模型接收参数",
       "v2.3.0": "接入 MP 订阅系统，支持 Bangumi 来源订阅，订阅后自动搜刮下载",
