@@ -41,7 +41,7 @@ class AnimeDiscovery(_PluginBase):
     plugin_name = "当季新番"
     plugin_desc = "发现当季新番，按日期分组，一键订阅追番。"
     plugin_icon = "mdi-play-circle"
-    plugin_version = "2.3.2"
+    plugin_version = "2.3.3"
     plugin_label = "订阅"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "anime_discovery_"
@@ -51,7 +51,7 @@ class AnimeDiscovery(_PluginBase):
     _enabled = False
     _data_source = "auto"
     _min_rating = 0.0
-    _auto_refresh = False
+    _auto_refresh = ""
     _notify_new = False
     _search_keyword = ""
     _hide_subscribed = False
@@ -66,7 +66,7 @@ class AnimeDiscovery(_PluginBase):
         self._enabled = False
         self._data_source = "auto"
         self._min_rating = 0.0
-        self._auto_refresh = False
+        self._auto_refresh = ""
         self._notify_new = False
         self._last_notify_date = ""
         if not config:
@@ -74,7 +74,7 @@ class AnimeDiscovery(_PluginBase):
         self._enabled = bool(config.get("enabled"))
         self._data_source = str(config.get("data_source") or "auto")
         self._min_rating = float(config.get("min_rating") or 0.0)
-        self._auto_refresh = bool(config.get("auto_refresh"))
+        self._auto_refresh = str(config.get("auto_refresh") or "")
         self._notify_new = bool(config.get("notify_new"))
 
         # 从持久化数据恢复上次通知日期，防止重启后重复推送
@@ -101,9 +101,15 @@ class AnimeDiscovery(_PluginBase):
         ]
 
     def get_service(self) -> List[Dict[str, Any]]:
+        """返回定时刷新调度服务，cron 表达式由用户配置。"""
         if not self._auto_refresh:
             return []
-        return [{"id": "AnimeDiscoveryRefresh", "name": "当季新番自动刷新", "trigger": CronTrigger.from_crontab("0 10 * * *"), "func": self._scheduled_refresh, "kwargs": {}}]
+        try:
+            trigger = CronTrigger.from_crontab(self._auto_refresh)
+        except Exception as e:
+            logger.error(f"自动刷新 cron 表达式无效: {self._auto_refresh}，{e}")
+            return []
+        return [{"id": "AnimeDiscoveryRefresh", "name": "当季新番自动刷新", "trigger": trigger, "func": self._scheduled_refresh, "kwargs": {}}]
 
     def get_form(self) -> Tuple[Optional[List[dict]], Dict[str, Any]]:
         return [
@@ -129,14 +135,19 @@ class AnimeDiscovery(_PluginBase):
                 ]},
                 {"component": "VRow", "content": [
                     {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                        {"component": "VSwitch", "props": {"model": "auto_refresh", "label": "每天10点自动刷新"}},
+                        {"component": "VTextField", "props": {
+                            "model": "auto_refresh", "label": "自动刷新 Cron 表达式",
+                            "hint": "留空=关闭。示例: 0 10 * * * (每天10点), 0 */6 * * * (每6小时), 0 8,20 * * * (每天8点和20点)",
+                            "placeholder": "0 10 * * *",
+                            "density": "compact", "hide-details": False,
+                        }},
                     ]},
                     {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                         {"component": "VSwitch", "props": {"model": "notify_new", "label": "新番发现时通知"}},
                     ]},
                 ]},
             ]}
-        ], {"enabled": False, "data_source": "auto", "min_rating": 0.0, "auto_refresh": False, "notify_new": False}
+        ], {"enabled": False, "data_source": "auto", "min_rating": 0.0, "auto_refresh": "", "notify_new": False}
 
     # ==================== 页面渲染 ====================
 
