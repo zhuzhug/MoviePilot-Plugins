@@ -1,8 +1,8 @@
 """
-当季新番发现插件
+热门TV与电影发现插件
 
-从 TMDB / Bangumi / 蜜柑 获取当季新番列表，
-按日期分组排列，一键订阅追番。
+从 TMDB 获取当季热门TV剧集和电影，
+按类型分组排列，一键订阅追剧。
 """
 
 import html
@@ -32,9 +32,7 @@ class SubscribeParams(BaseModel):
     title: str = Field(default="", description="标题")
     year: str = Field(default="", description="年份")
     tmdb_id: Optional[Union[str, int]] = Field(default=None, description="TMDB ID")
-    bangumi_id: Optional[Union[str, int]] = Field(default=None, description="Bangumi ID")
     media_type: str = Field(default="tv", description="媒体类型: tv 或 movie")
-    mikan_id: Optional[str] = Field(default=None, description="蜜柑ID")
 
 
 class HotTVAndMovies(_PluginBase):
@@ -43,7 +41,7 @@ class HotTVAndMovies(_PluginBase):
     plugin_name = "热门TV与电影"
     plugin_desc = "发现当季热门TV剧集和电影，按类型分组，一键订阅追剧。"
     plugin_icon = "mdi-movie-open"
-    plugin_version = "1.0.0"
+    plugin_version = "1.9.0"
     plugin_label = "订阅"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "hot_tv_movies_"
@@ -106,9 +104,10 @@ class HotTVAndMovies(_PluginBase):
     def get_api(self) -> List[Dict[str, Any]]:
         return [
             {"path": "/refresh", "endpoint": self._refresh_data, "methods": ["GET"], "summary": "刷新数据", "auth": "bear"},
-            {"path": "/subscribe", "endpoint": self._subscribe_anime, "methods": ["POST"], "summary": "订阅番剧", "auth": "bear"},
+            {"path": "/subscribe", "endpoint": self._subscribe_anime, "methods": ["POST"], "summary": "订阅", "auth": "bear"},
             {"path": "/unsubscribe", "endpoint": self._unsubscribe_anime, "methods": ["POST"], "summary": "取消订阅", "auth": "bear"},
             {"path": "/reset_notify", "endpoint": self._reset_notify_date, "methods": ["GET"], "summary": "重置通知日期", "auth": "bear"},
+            {"path": "/test_subscribe", "endpoint": self._test_subscribe, "methods": ["GET"], "summary": "测试订阅功能", "auth": "bear"},
         ]
 
     def get_service(self) -> List[Dict[str, Any]]:
@@ -158,7 +157,7 @@ class HotTVAndMovies(_PluginBase):
                         }},
                     ]},
                     {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                        {"component": "VSwitch", "props": {"model": "notify_new", "label": "新番发现时通知"}},
+                        {"component": "VSwitch", "props": {"model": "notify_new", "label": "发现更新时通知"}},
                     ]},
                 ]},
             ]}
@@ -170,7 +169,7 @@ class HotTVAndMovies(_PluginBase):
         if not self._enabled:
             return None
         api_token = settings.API_TOKEN
-        refresh_api = f"plugin/AnimeDiscovery/refresh?apikey={api_token}"
+        refresh_api = f"plugin/HotTVAndMovies/refresh?apikey={api_token}"
         self._loading = True
         data = self._get_anime_list()
         self._loading = False
@@ -467,19 +466,17 @@ class HotTVAndMovies(_PluginBase):
         }, "text": "已订阅" if subscribed else "订阅"}
         params = {"title": title, "year": anime.get("year", ""), "media_type": anime.get("media_type", "tv")}
         if tmdb_id: params["tmdb_id"] = tmdb_id
-        if bangumi_id: params["bangumi_id"] = bangumi_id
-        if anime.get("mikan_id"): params["mikan_id"] = anime["mikan_id"]
         
         if subscribed:
             # 已订阅状态，点击取消订阅
             subscribe_btn["events"] = {"click": {
-                "api": f"plugin/AnimeDiscovery/unsubscribe?apikey={api_token}",
+                "api": f"plugin/HotTVAndMovies/unsubscribe?apikey={api_token}",
                 "method": "post", "params": params,
             }}
         else:
             # 未订阅状态，点击订阅
             subscribe_btn["events"] = {"click": {
-                "api": f"plugin/AnimeDiscovery/subscribe?apikey={api_token}",
+                "api": f"plugin/HotTVAndMovies/subscribe?apikey={api_token}",
                 "method": "post", "params": params,
             }}
 
@@ -517,8 +514,12 @@ class HotTVAndMovies(_PluginBase):
 
     def _get_anime_list(self) -> List[Dict[str, Any]]:
         now = time.time()
+        # 如果有缓存且未过期，返回缓存数据，但仍然检查订阅状态
         if self._cache.get("anime_list") and (now - self._cache_time) < self._cache_ttl:
-            return self._cache["anime_list"]
+            cached_list = self._cache["anime_list"]
+            # 重新检查订阅状态（因为订阅状态可能在其他地方改变）
+            self._check_subscriptions(cached_list)
+            return cached_list
 
         if self._data_source == "auto":
             anime_list = self._fetch_auto()
@@ -536,7 +537,7 @@ class HotTVAndMovies(_PluginBase):
             if self._min_year > 0:
                 anime_list = [a for a in anime_list if int(a.get("year", "0") or "0") >= self._min_year]
 
-            # 新番通知（基于数据变化，避免异常重复推送）
+            # 更新通知（基于数据变化，避免异常重复推送）
             if self._notify_new:
                 # 检查最小间隔时间（1小时），避免异常重复推送
                 current_time = time.time()
@@ -578,7 +579,7 @@ class HotTVAndMovies(_PluginBase):
                             self.save_data("last_notify_time", current_time)
                         except Exception:
                             pass
-                        logger.info(f"已推送新番通知，时间: {datetime.now()}")
+                        logger.info(f"已推送更新通知，时间: {datetime.now()}")
                     # 无论是否推送，都更新持久化列表
                     try:
                         self.save_data("last_anime_titles", [a.get("title", "") for a in anime_list if a.get("title")])
@@ -624,7 +625,7 @@ class HotTVAndMovies(_PluginBase):
             gte, lte = self._get_season_range()
             ru = RequestUtils(proxies=settings.PROXY)
             
-            # 查询所有TV剧集
+            # 查询所有TV剧集（按热度排序，获取更多结果）
             tv_params = {"api_key": settings.TMDB_API_KEY, "language": "zh-CN", "first_air_date.gte": gte, "first_air_date.lte": lte, "sort_by": "popularity.desc", "page": 1}
             tv_resp = ru.get("https://api.themoviedb.org/3/discover/tv", params=tv_params, timeout=30)
             if tv_resp:
@@ -633,12 +634,12 @@ class HotTVAndMovies(_PluginBase):
                 for item in tv_data.get("results", [])[:50]:
                     anime_list.append({"title": item.get("name", ""), "year": str(item.get("first_air_date", "")[:4]) if item.get("first_air_date") else "", "air_date": item.get("first_air_date", ""), "season": sl, "rating": round(item.get("vote_average", 0), 1), "poster": f"https://image.tmdb.org/t/p/w300{item.get('poster_path', '')}" if item.get("poster_path") else "", "overview": item.get("overview", ""), "tmdb_id": item.get("id", ""), "media_type": "tv", "subscribed": False})
             
-            # 查询所有电影
-            movie_params = {"api_key": settings.TMDB_API_KEY, "language": "zh-CN", "release_date.gte": gte, "release_date.lte": lte, "sort_by": "popularity.desc", "page": 1}
+            # 查询所有电影（按上映日期排序，获取当季所有电影）
+            movie_params = {"api_key": settings.TMDB_API_KEY, "language": "zh-CN", "release_date.gte": gte, "release_date.lte": lte, "sort_by": "release_date.desc", "page": 1}
             movie_resp = ru.get("https://api.themoviedb.org/3/discover/movie", params=movie_params, timeout=30)
             if movie_resp:
                 movie_data = json.loads(movie_resp)
-                for item in movie_data.get("results", [])[:30]:
+                for item in movie_data.get("results", [])[:50]:  # 增加数量到50
                     anime_list.append({"title": item.get("title", ""), "year": str(item.get("release_date", "")[:4]) if item.get("release_date") else "", "air_date": item.get("release_date", ""), "season": "", "rating": round(item.get("vote_average", 0), 1), "poster": f"https://image.tmdb.org/t/p/w300{item.get('poster_path', '')}" if item.get("poster_path") else "", "overview": item.get("overview", ""), "tmdb_id": item.get("id", ""), "media_type": "movie", "subscribed": False})
         except Exception as e:
             logger.error(f"TMDB 请求失败: {e}")
@@ -751,13 +752,17 @@ class HotTVAndMovies(_PluginBase):
                 subs = db.query(Subscribe).filter(Subscribe.state.in_(["R", "N"]), Subscribe.type.in_(["电视剧", "电影"])).all()
                 sub_ids = {s.tmdbid for s in subs if s.tmdbid}
                 sub_names = {s.name for s in subs if s.name}
+                logger.info(f"订阅检查: 找到{len(subs)}条订阅记录, TMDB IDs: {sub_ids}, 标题: {list(sub_names)[:5]}")
                 for a in anime_list:
                     # 按 tmdb_id 匹配
                     tmdb_id = a.get("tmdb_id")
+                    title = a.get("title", "")
+                    logger.info(f"检查媒体: title='{title}', tmdb_id={tmdb_id}")
                     if tmdb_id:
                         try:
                             if int(tmdb_id) in sub_ids:
                                 a["subscribed"] = True
+                                logger.info(f"TMDB ID匹配成功: {tmdb_id} -> {title}")
                                 continue
                         except (ValueError, TypeError):
                             pass
@@ -790,7 +795,16 @@ class HotTVAndMovies(_PluginBase):
                             matched = True
                             logger.info(f"标题匹配成功: 原始='{raw_title}', 标准化='{title}' -> 订阅='{sub_names_normalized[title]}'")
                         else:
-                            logger.info(f"标题匹配失败: 原始='{raw_title}', 标准化='{title}', 可用订阅标题: {list(sub_names_normalized.keys())[:5]}")
+                            # 尝试模糊匹配（包含关系）
+                            for sub_name in sub_names:
+                                sub_normalized = normalize_title(sub_name)
+                                if sub_normalized and (sub_normalized in title or title in sub_normalized):
+                                    a["subscribed"] = True
+                                    matched = True
+                                    logger.info(f"模糊标题匹配成功: 原始='{raw_title}', 订阅='{sub_name}'")
+                                    break
+                            if not matched:
+                                logger.info(f"标题匹配失败: 原始='{raw_title}', 标准化='{title}', 可用订阅标题: {list(sub_names_normalized.keys())[:5]}")
             finally:
                 db.close()
         except Exception as e:
@@ -799,9 +813,20 @@ class HotTVAndMovies(_PluginBase):
     # ==================== API ====================
 
     def _refresh_data(self) -> dict:
-        self._cache = {}; self._cache_time = 0
-        data = self._get_anime_list()
-        return {"success": True, "count": len(data or [])}
+        # 彻底清除所有缓存
+        self._cache = {}
+        self._cache_time = 0
+        self._loading = False
+        logger.info("已清除所有缓存，开始重新获取数据")
+        
+        # 重新获取数据（会重新检查订阅状态）
+        try:
+            data = self._get_media_list()
+            logger.info(f"数据刷新完成，共 {len(data or [])} 条记录")
+            return {"success": True, "count": len(data or [])}
+        except Exception as e:
+            logger.error(f"数据刷新失败: {e}")
+            return {"success": False, "message": str(e)}
 
     def _scheduled_refresh(self):
         self._cache = {}; self._cache_time = 0
@@ -811,38 +836,39 @@ class HotTVAndMovies(_PluginBase):
         title = params.title
         year = params.year
         tmdb_id = params.tmdb_id
-        bangumi_id = params.bangumi_id
-        mikan_id = params.mikan_id
+        media_type = params.media_type
         if not title: return {"success": False, "message": "缺少标题"}
-        logger.info(f"收到订阅请求: title={title}, year={year}, tmdb_id={tmdb_id}, bangumi_id={bangumi_id}, mikan_id={mikan_id}")
+        logger.info(f"收到订阅请求: title={title}, year={year}, tmdb_id={tmdb_id}, media_type={media_type}")
         try:
             # 使用 MP 订阅系统，支持自动搜刮下载
             # 根据媒体类型选择订阅类型
-            if params.media_type == "movie":
+            if media_type == "movie":
                 mtype = MediaType.MOVIE
                 season = None
             else:
                 mtype = MediaType.TV
                 season = 1
             
+            logger.info(f"订阅参数: mtype={mtype}, season={season}")
             sid, msg = SubscribeChain().add(
                 title=title,
                 year=year,
                 mtype=mtype,
                 tmdbid=int(tmdb_id) if tmdb_id else None,
-                bangumiid=int(bangumi_id) if bangumi_id else None,
                 season=season,
                 message=True,
             )
             logger.info(f"订阅结果: sid={sid}, msg={msg}")
             if sid:
                 self._cache = {}; self._cache_time = 0
+                logger.info(f"订阅成功: sid={sid}, 已清除缓存，下次刷新将重新检查订阅状态")
                 # 保存蜜柑ID到本地映射表
                 if params.mikan_id:
                     try:
                         mikan_map = self.get_data("mikan_subscription_map") or {}
                         mikan_map[params.mikan_id] = sid
                         self.save_data("mikan_subscription_map", mikan_map)
+                        logger.info(f"已保存蜜柑映射: mikan_id={params.mikan_id} -> sid={sid}")
                     except Exception as e:
                         logger.warning(f"保存蜜柑映射失败: {e}")
                 return {"success": True, "message": f"已订阅 {title}，{msg}"}
@@ -952,6 +978,34 @@ class HotTVAndMovies(_PluginBase):
             return {"success": True, "message": "已重置通知日期，今天可以再次推送"}
         except Exception as e:
             logger.error(f"重置通知日期失败: {e}")
+            return {"success": False, "message": str(e)}
+
+    def _test_subscribe(self) -> dict:
+        """测试订阅功能"""
+        try:
+            # 测试参数
+            test_params = SubscribeParams(
+                title="测试电影",
+                year="2024",
+                tmdb_id=12345,
+                media_type="movie"
+            )
+            
+            logger.info(f"测试订阅: {test_params}")
+            
+            # 调用订阅方法
+            result = self._subscribe_anime(test_params)
+            
+            logger.info(f"测试订阅结果: {result}")
+            
+            return {
+                "success": True,
+                "message": "测试订阅功能已执行",
+                "params": test_params.dict(),
+                "result": result
+            }
+        except Exception as e:
+            logger.error(f"测试订阅失败: {e}")
             return {"success": False, "message": str(e)}
 
     def stop_service(self) -> None:
