@@ -41,7 +41,7 @@ class HotTVAndMovies(_PluginBase):
     plugin_name = "热门TV与电影"
     plugin_desc = "发现当季热门TV剧集和电影，按类型分组，一键订阅追剧。"
     plugin_icon = "mdi-movie-open"
-    plugin_version = "2.0.0"
+    plugin_version = "2.0.1"
     plugin_label = "订阅"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "hot_tv_movies_"
@@ -572,7 +572,7 @@ class HotTVAndMovies(_PluginBase):
                                 return "未知"
                         
                         titles = "\n".join([f"· {a.get('title')} ★{a.get('rating', 0)} | {get_air_desc(a.get('air_date', ''))}" for a in new_anime[:10]])
-                        title_text = f"{today} 今日新番更新 (+{len(new_anime)})"
+                        title_text = f"{today} 今日更新 (+{len(new_anime)})"
                         self.post_message(mtype=NotificationType.Manual, title=title_text, text=titles)
                         self._last_notify_time = current_time
                         try:
