@@ -43,7 +43,7 @@ class AnimeDiscovery(_PluginBase):
     plugin_name = "当季新番"
     plugin_desc = "发现当季新番，按日期分组，一键订阅追番。"
     plugin_icon = "mdi-play-circle"
-    plugin_version = "2.14.3"
+    plugin_version = "2.14.6"
     plugin_label = "订阅"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "anime_discovery_"
@@ -72,6 +72,7 @@ class AnimeDiscovery(_PluginBase):
         self._auto_refresh = ""
         self._notify_new = False
         self._last_notify_date = ""
+        self._last_notify_time = 0
         if not config:
             return
         self._enabled = bool(config.get("enabled"))
@@ -84,6 +85,9 @@ class AnimeDiscovery(_PluginBase):
         # 从持久化数据恢复上次通知日期，防止重启后重复推送
         try:
             saved = self.get_data("last_notify_date")
+            saved_time = self.get_data("last_notify_time")
+            if saved_time:
+                self._last_notify_time = float(saved_time)
             if saved:
                 self._last_notify_date = str(saved)
         except Exception:
@@ -103,6 +107,7 @@ class AnimeDiscovery(_PluginBase):
             {"path": "/refresh", "endpoint": self._refresh_data, "methods": ["GET"], "summary": "刷新数据", "auth": "bear"},
             {"path": "/subscribe", "endpoint": self._subscribe_anime, "methods": ["POST"], "summary": "订阅番剧", "auth": "bear"},
             {"path": "/unsubscribe", "endpoint": self._unsubscribe_anime, "methods": ["POST"], "summary": "取消订阅", "auth": "bear"},
+            {"path": "/reset_notify", "endpoint": self._reset_notify_date, "methods": ["GET"], "summary": "重置通知日期", "auth": "bear"},
         ]
 
     def get_service(self) -> List[Dict[str, Any]]:
@@ -516,17 +521,21 @@ class AnimeDiscovery(_PluginBase):
             if self._min_year > 0:
                 anime_list = [a for a in anime_list if int(a.get("year", "0") or "0") >= self._min_year]
 
-            # 新番通知（每天最多推送一次）
+            # 新番通知（基于数据变化，避免异常重复推送）
             if self._notify_new:
-                today = datetime.now().strftime("%Y-%m-%d")
-                if self._last_notify_date == today:
-                    logger.info("今日已推送过新番通知，跳过")
+                # 检查最小间隔时间（1小时），避免异常重复推送
+                current_time = time.time()
+                min_interval = 3600  # 1小时
+                if current_time - self._last_notify_time < min_interval:
+                    logger.info(f"距离上次通知不足{min_interval//3600}小时，跳过")
                 else:
                     # 用持久化的上次列表做比对，避免缓存过期导致全量推送
                     saved_list = self.get_data("last_anime_titles") or []
                     saved_titles = set(saved_list)
-                    new_anime = [a for a in anime_list if a.get("title") and a["title"] not in saved_titles]
+                    today = datetime.now().strftime("%Y-%m-%d")
+                    new_anime = [a for a in anime_list if a.get("title") and a["title"] not in saved_titles and a.get("air_date", "")[:10] == today]
                     if new_anime:
+                        today = datetime.now().strftime("%Y-%m-%d")
                         def get_air_desc(ad):
                             if not ad:
                                 return "未知"
@@ -547,14 +556,14 @@ class AnimeDiscovery(_PluginBase):
                                 return "未知"
                         
                         titles = "\n".join([f"· {a.get('title')} ★{a.get('rating', 0)} | {get_air_desc(a.get('air_date', ''))}" for a in new_anime[:10]])
-                        title_text = f"{today} 新番更新 (+{len(new_anime)})"
+                        title_text = f"{today} 今日新番更新 (+{len(new_anime)})"
                         self.post_message(mtype=NotificationType.Manual, title=title_text, text=titles)
-                        self._last_notify_date = today
+                        self._last_notify_time = current_time
                         try:
-                            self.save_data("last_notify_date", today)
+                            self.save_data("last_notify_time", current_time)
                         except Exception:
                             pass
-                        logger.info(f"已推送新番通知，今日日期: {today}")
+                        logger.info(f"已推送新番通知，时间: {datetime.now()}")
                     # 无论是否推送，都更新持久化列表
                     try:
                         self.save_data("last_anime_titles", [a.get("title", "") for a in anime_list if a.get("title")])
@@ -928,6 +937,17 @@ class AnimeDiscovery(_PluginBase):
                 db.close()
         except Exception as e:
             logger.error(f"订阅异常: {e}")
+            return {"success": False, "message": str(e)}
+
+    def _reset_notify_date(self) -> dict:
+        """重置通知日期，允许今天再次推送"""
+        try:
+            self._last_notify_date = ""
+            self.save_data("last_notify_date", "")
+            logger.info("已重置通知日期")
+            return {"success": True, "message": "已重置通知日期，今天可以再次推送"}
+        except Exception as e:
+            logger.error(f"重置通知日期失败: {e}")
             return {"success": False, "message": str(e)}
 
     def stop_service(self) -> None:
