@@ -41,7 +41,7 @@ class HotTVAndMovies(_PluginBase):
     plugin_name = "热门TV与电影"
     plugin_desc = "发现当季热门TV剧集和电影，按类型分组，一键订阅追剧。"
     plugin_icon = "mdi-movie-open"
-    plugin_version = "1.9.0"
+    plugin_version = "2.0.0"
     plugin_label = "订阅"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "hot_tv_movies_"
