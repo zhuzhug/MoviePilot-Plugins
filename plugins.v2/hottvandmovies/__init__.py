@@ -41,7 +41,7 @@ class HotTVAndMovies(_PluginBase):
     plugin_name = "热门TV与电影"
     plugin_desc = "发现当季热门TV剧集和电影，按类型分组，一键订阅追剧。"
     plugin_icon = "mdi-movie-open"
-    plugin_version = "2.2.2"
+    plugin_version = "2.2.3"
     plugin_label = "订阅"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "hot_tv_movies_"
@@ -523,22 +523,20 @@ class HotTVAndMovies(_PluginBase):
             if self._min_year > 0:
                 anime_list = [a for a in anime_list if int(a.get("year", "0") or "0") >= self._min_year]
 
-            # 每次刷新推送通知（按星期几匹配今天更新的剧集，不限次数）
+            # 每次刷新推送热门内容通知
             if self._notify_new:
-                # 筛选今天播出的内容（按星期几匹配）
-                today_weekday = datetime.now().isoweekday()  # 1=周一 ... 7=周日
-                today_items = [a for a in anime_list if a.get("air_weekday") == today_weekday]
-                if today_items:
-                    # 按评分排序
-                    today_items.sort(key=lambda a: a.get("rating", 0), reverse=True)
-                    titles = "\n".join([f"· {a.get('title')} ★{a.get('rating', 0)}" for a in today_items[:10]])
-                    title_text = f"[热门TV与电影] 今日更新 ({len(today_items)}部)"
+                # 按评分排序，取 Top 10
+                sorted_items = sorted(anime_list, key=lambda a: a.get("rating", 0), reverse=True)
+                top_items = sorted_items[:10]
+                if top_items:
+                    titles = "\n".join([f"· {a.get('title')} ★{a.get('rating', 0)}" for a in top_items])
+                    title_text = f"[热门TV与电影] 当季热门 Top{len(top_items)}"
                 else:
-                    titles = "今日暂无更新"
-                    title_text = f"[热门TV与电影] 今日更新 (0部)"
+                    titles = "暂无热门内容"
+                    title_text = f"[热门TV与电影] 当季热门 (0部)"
 
                 self.post_message(mtype=NotificationType.Manual, title=title_text, text=titles)
-                logger.info(f"已推送每日热门通知，{len(today_items)}部更新，时间: {datetime.now()}")
+                logger.info(f"已推送热门通知，{len(top_items)}部，时间: {datetime.now()}")
 
         self._cache["anime_list"] = anime_list
         self._cache_time = now
