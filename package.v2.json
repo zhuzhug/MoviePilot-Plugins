@@ -53,7 +53,7 @@
     "name": "热门TV与电影",
     "description": "发现当季热门TV剧集和电影，按类型分组，一键订阅追剧。",
     "labels": "订阅",
-    "version": "2.2.5",
+    "version": "2.2.6",
     "icon": "mdi-movie-open",
     "author": "zhuzhug",
     "level": 1
