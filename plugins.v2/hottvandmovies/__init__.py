@@ -41,7 +41,7 @@ class HotTVAndMovies(_PluginBase):
     plugin_name = "热门TV与电影"
     plugin_desc = "发现当季热门TV剧集和电影，按类型分组，一键订阅追剧。"
     plugin_icon = "mdi-movie-open"
-    plugin_version = "2.2.1"
+    plugin_version = "2.2.2"
     plugin_label = "订阅"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "hot_tv_movies_"
@@ -104,7 +104,7 @@ class HotTVAndMovies(_PluginBase):
         except Exception as e:
             logger.error(f"自动刷新 cron 表达式无效: {self._auto_refresh}，{e}")
             return []
-        return [{"id": "AnimeDiscoveryRefresh", "name": "当季新番自动刷新", "trigger": trigger, "func": self._scheduled_refresh, "kwargs": {}}]
+        return [{"id": "HotTVAndMoviesRefresh", "name": "热门TV与电影自动刷新", "trigger": trigger, "func": self._scheduled_refresh, "kwargs": {}}]
 
     def get_form(self) -> Tuple[Optional[List[dict]], Dict[str, Any]]:
         return [
