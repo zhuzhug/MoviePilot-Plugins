@@ -47,7 +47,10 @@
     "version": "2.14.8",
     "icon": "mdi-play-circle",
     "author": "zhuzhug",
-    "level": 1
+    "level": 1,
+    "history": {
+      "v2.14.8": "通知推送当日全部新番，不再限制Top10条数"
+    }
   },
   "HotTVAndMovies": {
     "name": "热门TV与电影",
