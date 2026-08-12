@@ -41,7 +41,7 @@ class HotTVAndMovies(_PluginBase):
     plugin_name = "热门TV与电影"
     plugin_desc = "发现当季热门TV剧集和电影，按类型分组，一键订阅追剧。"
     plugin_icon = "mdi-movie-open"
-    plugin_version = "2.2.3"
+    plugin_version = "2.2.4"
     plugin_label = "订阅"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "hot_tv_movies_"
@@ -564,24 +564,33 @@ class HotTVAndMovies(_PluginBase):
     def _fetch_tmdb(self) -> List[Dict[str, Any]]:
         anime_list = []
         try:
-            gte, lte = self._get_season_range()
+            now = datetime.now()
+            # TV：用当前日期往前推1年，覆盖正在播出和近期开播的剧
+            tv_gte = f"{now.year - 1}-01-01"
+            tv_lte = now.strftime("%Y-%m-%d")
+            # 电影：用当季范围
+            mov_gte, mov_lte = self._get_season_range()
             ru = RequestUtils(proxies=settings.PROXY)
-            
-            # 查询所有TV剧集（按热度排序，获取更多结果）
-            tv_params = {"api_key": settings.TMDB_API_KEY, "language": "zh-CN", "without_genres": "16", "first_air_date.gte": gte, "first_air_date.lte": lte, "sort_by": "popularity.desc", "page": 1}
+
+            # 查询正在播出/近期开播的TV剧集（排除动画，按热度排序）
+            tv_params = {"api_key": settings.TMDB_API_KEY, "language": "zh-CN", "without_genres": "16",
+                         "first_air_date.gte": tv_gte, "first_air_date.lte": tv_lte,
+                         "sort_by": "popularity.desc", "page": 1}
             tv_resp = ru.get("https://api.themoviedb.org/3/discover/tv", params=tv_params, timeout=30)
             if tv_resp:
                 tv_data = json.loads(tv_resp)
                 sl = self._get_season_label()
                 for item in tv_data.get("results", [])[:50]:
                     anime_list.append({"title": item.get("name", ""), "year": str(item.get("first_air_date", "")[:4]) if item.get("first_air_date") else "", "air_date": item.get("first_air_date", ""), "season": sl, "rating": round(item.get("vote_average", 0), 1), "poster": f"https://image.tmdb.org/t/p/w300{item.get('poster_path', '')}" if item.get("poster_path") else "", "overview": item.get("overview", ""), "tmdb_id": item.get("id", ""), "media_type": "tv", "subscribed": False})
-            
-            # 查询所有电影（按上映日期排序，获取当季所有电影）
-            movie_params = {"api_key": settings.TMDB_API_KEY, "language": "zh-CN", "release_date.gte": gte, "release_date.lte": lte, "sort_by": "release_date.desc", "page": 1}
+
+            # 查询当季电影（按上映日期排序）
+            movie_params = {"api_key": settings.TMDB_API_KEY, "language": "zh-CN",
+                            "release_date.gte": mov_gte, "release_date.lte": mov_lte,
+                            "sort_by": "release_date.desc", "page": 1}
             movie_resp = ru.get("https://api.themoviedb.org/3/discover/movie", params=movie_params, timeout=30)
             if movie_resp:
                 movie_data = json.loads(movie_resp)
-                for item in movie_data.get("results", [])[:50]:  # 增加数量到50
+                for item in movie_data.get("results", [])[:50]:
                     anime_list.append({"title": item.get("title", ""), "year": str(item.get("release_date", "")[:4]) if item.get("release_date") else "", "air_date": item.get("release_date", ""), "season": "", "rating": round(item.get("vote_average", 0), 1), "poster": f"https://image.tmdb.org/t/p/w300{item.get('poster_path', '')}" if item.get("poster_path") else "", "overview": item.get("overview", ""), "tmdb_id": item.get("id", ""), "media_type": "movie", "subscribed": False})
         except Exception as e:
             logger.error(f"TMDB 请求失败: {e}")
