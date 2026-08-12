@@ -70,6 +70,12 @@ class BatchDeleteParams(BaseModel):
     delete_files: bool = Field(default=False, description="是否同时删除文件")
 
 
+class TranslateParams(BaseModel):
+    """翻译种子名参数。"""
+
+    names: List[str] = Field(..., description="需要翻译的种子名列表")
+
+
 class CrossSeedView(_PluginBase):
     """辅种查看插件：扫描下载器中的种子，按 name+size 分组识别辅种，用于清理孤种。"""
 
@@ -77,7 +83,7 @@ class CrossSeedView(_PluginBase):
     plugin_name = "辅种查看"
     plugin_desc = "扫描所有下载器种子，按“种子名+大小”识别辅种关系，用可折叠卡片展示辅种数量、保存路径与明细，支持交互筛选与可选删除。"
     plugin_icon = "seed.png"
-    plugin_version = "1.2.1"
+    plugin_version = "1.2.2"
     plugin_label = "下载器"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "crossseedview_"
@@ -125,6 +131,8 @@ class CrossSeedView(_PluginBase):
     _current_page: int = 1
     # 每页分组数（详情页分页大小）
     PAGE_SIZE: int = 50
+    # 翻译缓存：{原始名: 中文名}，非持久化
+    _translation_cache: Dict[str, str] = {}
     # endregion
 
     def init_plugin(self, config: dict = None) -> None:
@@ -298,6 +306,13 @@ class CrossSeedView(_PluginBase):
                 "methods": ["POST"],
                 "auth": "bear",
                 "summary": "批量删除已选中的种子",
+            },
+            {
+                "path": "/translate",
+                "endpoint": self.translate_names,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "批量翻译种子名为中文",
             },
         ]
 
@@ -1118,6 +1133,75 @@ class CrossSeedView(_PluginBase):
                 message=f"批量删除 {succeeded}/{total} 成功，失败：{'; '.join(failed_dls)}{link_msg}",
             )
         return Response(success=True, message=f"已批量删除 {succeeded} 项{link_msg}")
+
+    # ==================== 翻译功能 ====================
+
+    def translate_names(self, params: TranslateParams) -> dict:
+        """批量翻译种子名为中文，结果缓存在内存中。"""
+        if not params.names:
+            return {"success": True, "translations": {}}
+
+        # 过滤已缓存的
+        to_translate = []
+        result = {}
+        for name in params.names:
+            if name in self._translation_cache:
+                result[name] = self._translation_cache[name]
+            else:
+                to_translate.append(name)
+
+        if not to_translate:
+            return {"success": True, "translations": result}
+
+        # 调用 LLM 翻译
+        try:
+            from app.utils.http import RequestUtils
+
+            batch_text = "\n".join([f"{i+1}. {n}" for i, n in enumerate(to_translate[:30])])
+            prompt = (
+                f"将以下英文/日文影视种子名翻译成简洁的中文名，每行一个，只输出中文译名，不要编号和解释。\n\n{batch_text}"
+            )
+
+            base_url = settings.LLM_BASE_URL or "https://api.openai.com/v1"
+            model = settings.LLM_MODEL or "gpt-3.5-turbo"
+            url = f"{base_url.rstrip('/')}/chat/completions"
+
+            headers = {
+                "Authorization": f"Bearer {settings.LLM_API_KEY}",
+                "Content-Type": "application/json",
+            }
+            payload = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": "你是影视翻译助手，只输出中文译名。"},
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": 0.3,
+                "max_tokens": 1024,
+            }
+
+            ru = RequestUtils(proxies=settings.PROXY if settings.LLM_USE_PROXY else None)
+            resp = ru.post(url, json=payload, headers=headers, timeout=30)
+
+            if resp and hasattr(resp, "json"):
+                data = resp.json()
+                content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                # 解析结果
+                lines = [l.strip() for l in content.strip().split("\n") if l.strip()]
+                for i, line in enumerate(lines):
+                    if i < len(to_translate):
+                        # 去掉可能的编号前缀
+                        translated = line.lstrip("0123456789.、. ").strip()
+                        if translated:
+                            self._translation_cache[to_translate[i]] = translated
+                            result[to_translate[i]] = translated
+                logger.info(f"[CrossSeedView] 翻译完成 {len(result)}/{len(params.names)} 条")
+            else:
+                logger.warning("[CrossSeedView] 翻译 API 无响应")
+        except Exception as err:
+            logger.error(f"[CrossSeedView] 翻译失败: {err}")
+
+        return {"success": True, "translations": result}
 
 
     def get_service(self) -> List[Dict[str, Any]]:
@@ -2351,6 +2435,8 @@ class CrossSeedView(_PluginBase):
                 show_delete = self._allow_delete
                 torrents = it.get("torrents") or []
                 name_text = it["name"]
+                # 检查是否有中文翻译
+                cn_name = self._translation_cache.get(name_text, "")
                 # 组头复选框：计算组的选中状态
                 group_pairs = [
                     {"hash": str(t.get("hash") or ""), "downloader": str(t.get("downloader") or "")}
@@ -2415,18 +2501,30 @@ class CrossSeedView(_PluginBase):
                 # 卡片头：名称 + 概要 chips（名称可选中复制，不触发展开）
                 # v0.5.12: header_row 内只放名称+chips；复选框剥离到 VCard 左侧独立列，
                 # 折叠时也能稳定可见，绝不会被 flex-wrap 挤到隐藏位置。
+                name_content: List[dict] = [
+                    {
+                        "component": "div",
+                        "props": {
+                            "class": "text-subtitle-2 mr-3",
+                            "style": "flex: 1 1 auto; min-width: 0; user-select: text; cursor: text; word-break: break-all; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;" if cn_name else "flex: 1 1 auto; min-width: 0; user-select: text; cursor: text; word-break: break-all;",
+                        },
+                        "text": name_text,
+                    },
+                ]
+                # 有中文译名时，在原名下方追加一行
+                if cn_name:
+                    name_content.append({
+                        "component": "div",
+                        "props": {
+                            "class": "text-caption orange-darken-1 mr-3",
+                            "style": "flex: 1 1 auto; min-width: 0; word-break: break-all; font-weight: 500;",
+                        },
+                        "text": f"🇨🇳 {cn_name}",
+                    })
                 header_row = {
                     "component": "div",
                     "props": {"class": "d-flex flex-wrap align-center px-4 pt-3 pb-2"},
-                    "content": [
-                        {
-                            "component": "div",
-                            "props": {
-                                "class": "text-subtitle-2 mr-3",
-                                "style": "flex: 1 1 auto; min-width: 0; user-select: text; cursor: text; word-break: break-all;",
-                            },
-                            "text": name_text,
-                        },
+                    "content": name_content + [
                         {
                             "component": "VChip",
                             "props": {
@@ -2824,6 +2922,18 @@ class CrossSeedView(_PluginBase):
                             "props": {"color": "primary", "variant": "tonal", "prepend-icon": "mdi-refresh", "size": "x-small"},
                             "text": "刷新",
                             "events": {"click": {"api": refresh_api, "method": "get"}},
+                        }
+                    ],
+                },
+                {
+                    "component": "VCol",
+                    "props": {"cols": "auto"},
+                    "content": [
+                        {
+                            "component": "VBtn",
+                            "props": {"color": "orange", "variant": "tonal", "prepend-icon": "mdi-translate", "size": "x-small"},
+                            "text": "翻译",
+                            "events": {"click": {"api": f"plugin/CrossSeedView/translate?apikey={settings.API_TOKEN}", "method": "post", "params": {"names": [g.get("name", "") for g in page_items if g.get("name")][:30]}}},
                         }
                     ],
                 },
