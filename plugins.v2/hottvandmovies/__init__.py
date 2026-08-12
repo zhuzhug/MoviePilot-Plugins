@@ -41,7 +41,7 @@ class HotTVAndMovies(_PluginBase):
     plugin_name = "热门TV与电影"
     plugin_desc = "发现当季热门TV剧集和电影，按类型分组，一键订阅追剧。"
     plugin_icon = "mdi-movie-open"
-    plugin_version = "2.2.6"
+    plugin_version = "2.2.7"
     plugin_label = "订阅"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "hot_tv_movies_"
@@ -529,7 +529,8 @@ class HotTVAndMovies(_PluginBase):
                 today_items = []
                 for a in anime_list:
                     ad = a.get("air_date", "")
-                    if ad:
+                    rating = a.get("rating", 0)
+                    if ad and rating > 0:
                         try:
                             ad_date = datetime.strptime(ad[:10], "%Y-%m-%d").date()
                             if ad_date.isoweekday() == today_weekday:
