@@ -83,7 +83,7 @@ class CrossSeedView(_PluginBase):
     plugin_name = "辅种查看"
     plugin_desc = "扫描所有下载器种子，按“种子名+大小”识别辅种关系，用可折叠卡片展示辅种数量、保存路径与明细，支持交互筛选与可选删除。"
     plugin_icon = "seed.png"
-    plugin_version = "1.2.2"
+    plugin_version = "1.2.3"
     plugin_label = "下载器"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "crossseedview_"
@@ -1157,7 +1157,7 @@ class CrossSeedView(_PluginBase):
         try:
             from app.utils.http import RequestUtils
 
-            batch_text = "\n".join([f"{i+1}. {n}" for i, n in enumerate(to_translate[:30])])
+            batch_text = "\n".join([f"{i+1}. {n}" for i, n in enumerate(to_translate)])
             prompt = (
                 f"将以下英文/日文影视种子名翻译成简洁的中文名，每行一个，只输出中文译名，不要编号和解释。\n\n{batch_text}"
             )
@@ -1205,17 +1205,8 @@ class CrossSeedView(_PluginBase):
 
 
     def get_service(self) -> List[Dict[str, Any]]:
-        if not self._enabled:
-            return []
-        return [
-            {
-                "id": "CrossSeedViewRefresh",
-                "name": "辅种查看-立即扫描",
-                "trigger": CronTrigger.from_crontab(self._cron, timezone=pytz.timezone(settings.TZ)),
-                "func": self._scheduled_refresh,
-                "kwargs": {},
-            }
-        ]
+        # 一次性插件，不注册定时任务
+        return []
 
     def get_form(self) -> Tuple[Optional[List[dict]], Dict[str, Any]]:
         """返回插件配置表单与默认值。"""
@@ -2933,7 +2924,7 @@ class CrossSeedView(_PluginBase):
                             "component": "VBtn",
                             "props": {"color": "orange", "variant": "tonal", "prepend-icon": "mdi-translate", "size": "x-small"},
                             "text": "翻译",
-                            "events": {"click": {"api": f"plugin/CrossSeedView/translate?apikey={settings.API_TOKEN}", "method": "post", "params": {"names": [g.get("name", "") for g in page_items if g.get("name")][:30]}}},
+                            "events": {"click": {"api": f"plugin/CrossSeedView/translate?apikey={settings.API_TOKEN}", "method": "post", "params": {"names": [g.get("name", "") for g in page_items if g.get("name")]}}},
                         }
                     ],
                 },
