@@ -43,7 +43,7 @@ class AnimeDiscovery(_PluginBase):
     plugin_name = "当季新番"
     plugin_desc = "发现当季新番，按日期分组，一键订阅追番。"
     plugin_icon = "mdi-play-circle"
-    plugin_version = "2.14.6"
+    plugin_version = "2.14.8"
     plugin_label = "订阅"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "anime_discovery_"
@@ -73,6 +73,7 @@ class AnimeDiscovery(_PluginBase):
         self._notify_new = False
         self._last_notify_date = ""
         self._last_notify_time = 0
+        self._loading = False
         if not config:
             return
         self._enabled = bool(config.get("enabled"))
@@ -139,6 +140,7 @@ class AnimeDiscovery(_PluginBase):
                             ],
                         }}
                     ]},
+
                     {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
                         {"component": "VTextField", "props": {"model": "min_rating", "label": "最低评分", "type": "number", "hint": "0=全部"}},
                     ]},
@@ -169,7 +171,20 @@ class AnimeDiscovery(_PluginBase):
             return None
         api_token = settings.API_TOKEN
         refresh_api = f"plugin/AnimeDiscovery/refresh?apikey={api_token}"
+        self._loading = True
         data = self._get_anime_list()
+        self._loading = False
+        if self._loading:
+            return [
+                {"component": "VCard", "props": {"variant": "tonal"}, "content": [
+                    {"component": "VCardText", "content": [
+                        {"component": "div", "props": {"class": "text-center pa-4"}, "content": [
+                            {"component": "VProgressCircular", "props": {"indeterminate": True, "color": "primary", "class": "mb-2"}},
+                            {"component": "div", "props": {"class": "text-body-1 text-grey"}, "text": "正在加载数据..."},
+                        ]},
+                    ]},
+                ]},
+            ]
         if not data:
             return [
                 {"component": "VCard", "props": {"variant": "tonal"}, "content": [
@@ -521,54 +536,32 @@ class AnimeDiscovery(_PluginBase):
             if self._min_year > 0:
                 anime_list = [a for a in anime_list if int(a.get("year", "0") or "0") >= self._min_year]
 
-            # 新番通知（基于数据变化，避免异常重复推送）
+            # 每日推送通知（按星期几匹配今天更新的番剧，不限次数）
             if self._notify_new:
-                # 检查最小间隔时间（1小时），避免异常重复推送
-                current_time = time.time()
-                min_interval = 3600  # 1小时
-                if current_time - self._last_notify_time < min_interval:
-                    logger.info(f"距离上次通知不足{min_interval//3600}小时，跳过")
-                else:
-                    # 用持久化的上次列表做比对，避免缓存过期导致全量推送
-                    saved_list = self.get_data("last_anime_titles") or []
-                    saved_titles = set(saved_list)
-                    today = datetime.now().strftime("%Y-%m-%d")
-                    new_anime = [a for a in anime_list if a.get("title") and a["title"] not in saved_titles and a.get("air_date", "")[:10] == today]
-                    if new_anime:
-                        today = datetime.now().strftime("%Y-%m-%d")
-                        def get_air_desc(ad):
-                            if not ad:
-                                return "未知"
-                            try:
-                                ad_date = datetime.strptime(ad[:10], "%Y-%m-%d").date()
-                                today_date = datetime.now().date()
-                                diff = (ad_date - today_date).days
-                                if diff == 0:
-                                    return "今天播出"
-                                elif diff == 1:
-                                    return "明天"
-                                elif 2 <= diff <= 6:
-                                    weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
-                                    return weekdays[ad_date.weekday()]
-                                else:
-                                    return ad_date.strftime("%m-%d")
-                            except:
-                                return "未知"
-                        
-                        titles = "\n".join([f"· {a.get('title')} ★{a.get('rating', 0)} | {get_air_desc(a.get('air_date', ''))}" for a in new_anime[:10]])
-                        title_text = f"{today} 今日新番更新 (+{len(new_anime)})"
-                        self.post_message(mtype=NotificationType.Manual, title=title_text, text=titles)
-                        self._last_notify_time = current_time
+                today_weekday = datetime.now().isoweekday()  # 1=周一 ... 7=周日
+                # 筛选 air_date 的星期几 = 今天星期几的番剧
+                today_items = []
+                for a in anime_list:
+                    ad = a.get("air_date", "")
+                    if ad:
                         try:
-                            self.save_data("last_notify_time", current_time)
+                            ad_date = datetime.strptime(ad[:10], "%Y-%m-%d").date()
+                            if ad_date.isoweekday() == today_weekday:
+                                today_items.append(a)
                         except Exception:
                             pass
-                        logger.info(f"已推送新番通知，时间: {datetime.now()}")
-                    # 无论是否推送，都更新持久化列表
-                    try:
-                        self.save_data("last_anime_titles", [a.get("title", "") for a in anime_list if a.get("title")])
-                    except Exception:
-                        pass
+                
+                if today_items:
+                    # 按评分排序，推送全部
+                    today_items.sort(key=lambda a: a.get("rating", 0), reverse=True)
+                    titles = "\n".join([f"· {a.get('title')} ★{a.get('rating', 0)}" for a in today_items])
+                    title_text = f"[当季新番] 今日新番 ({len(today_items)}部)"
+                else:
+                    titles = "今日暂无新番更新"
+                    title_text = f"[当季新番] 今日新番 (0部)"
+                
+                self.post_message(mtype=NotificationType.Manual, title=title_text, text=titles)
+                logger.info(f"已推送新番通知，{len(today_items)}部更新，时间: {datetime.now()}")
 
         self._cache["anime_list"] = anime_list
         self._cache_time = now
