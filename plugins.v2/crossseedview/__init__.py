@@ -4,7 +4,6 @@ from threading import Lock
 from typing import Any, Dict, List, Optional, Tuple
 
 import pytz
-from apscheduler.triggers.cron import CronTrigger
 from pydantic import BaseModel, Field
 
 from app import schemas
@@ -136,9 +135,10 @@ class CrossSeedView(_PluginBase):
     # endregion
 
     def init_plugin(self, config: dict = None) -> None:
-        """初始化：读取配置，可选立即扫描一次。"""
+        """初始化：读取配置，可选立即扫描一次。周期性扫描由 get_service() 交给 MP 主调度器。"""
         if config:
             self._enabled = bool(config.get("enabled"))
+            self._cron = ""  # 保留属性避免配置读取报错，不再使用
             try:
                 self._min_count = max(1, int(config.get("min_count") or 2))
             except (TypeError, ValueError):
@@ -215,7 +215,7 @@ class CrossSeedView(_PluginBase):
                 logger.error(f"[CrossSeedView] 启动首次扫描失败：{err}")
 
         logger.info(
-            f"[CrossSeedView] 初始化完成，CRON={self._cron}，"
+            f"[CrossSeedView] 初始化完成，"
             f"过滤下载器={self._downloader_filter or '全部'}"
         )
 
@@ -2935,13 +2935,6 @@ class CrossSeedView(_PluginBase):
         ]
 
     # ---------------- 扫描逻辑 ----------------
-
-    def _scheduled_refresh(self) -> None:
-        """定时任务入口。"""
-        try:
-            self._refresh_cache(source="cron")
-        except Exception as err:
-            logger.error(f"[CrossSeedView] 定时扫描失败：{err}")
 
     def _refresh_cache(self, source: str = "manual") -> None:
         """扫描所有下载器，重建缓存。"""
