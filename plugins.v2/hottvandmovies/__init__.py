@@ -41,7 +41,7 @@ class HotTVAndMovies(_PluginBase):
     plugin_name = "热门TV与电影"
     plugin_desc = "发现当季热门TV剧集和电影，按类型分组，一键订阅追剧。"
     plugin_icon = "mdi-movie-open"
-    plugin_version = "2.0.1"
+    plugin_version = "2.2.1"
     plugin_label = "订阅"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "hot_tv_movies_"
@@ -59,7 +59,6 @@ class HotTVAndMovies(_PluginBase):
     _cache_time: float = 0
     _cache_ttl: int = 3600
     _scheduler: Optional[BackgroundScheduler] = None  # deprecated, kept for stop_service compat
-    _last_notify_date: str = ""  # 上次通知日期，防止重复推送（持久化）
 
     def init_plugin(self, config: dict = None) -> None:
         self.stop_service()
@@ -69,8 +68,6 @@ class HotTVAndMovies(_PluginBase):
         self._min_year = 0
         self._auto_refresh = ""
         self._notify_new = False
-        self._last_notify_date = ""
-        self._last_notify_time = 0
         self._loading = False
         if not config:
             return
@@ -80,17 +77,6 @@ class HotTVAndMovies(_PluginBase):
         self._min_year = int(config.get("min_year") or 0)
         self._auto_refresh = str(config.get("auto_refresh") or "")
         self._notify_new = bool(config.get("notify_new"))
-
-        # 从持久化数据恢复上次通知日期，防止重启后重复推送
-        try:
-            saved = self.get_data("last_notify_date")
-            saved_time = self.get_data("last_notify_time")
-            if saved_time:
-                self._last_notify_time = float(saved_time)
-            if saved:
-                self._last_notify_date = str(saved)
-        except Exception:
-            pass
 
         # 调度由 get_service 统一注册到 MP 系统调度器，不再自建 BackgroundScheduler
 
@@ -106,7 +92,6 @@ class HotTVAndMovies(_PluginBase):
             {"path": "/refresh", "endpoint": self._refresh_data, "methods": ["GET"], "summary": "刷新数据", "auth": "bear"},
             {"path": "/subscribe", "endpoint": self._subscribe_anime, "methods": ["POST"], "summary": "订阅", "auth": "bear"},
             {"path": "/unsubscribe", "endpoint": self._unsubscribe_anime, "methods": ["POST"], "summary": "取消订阅", "auth": "bear"},
-            {"path": "/reset_notify", "endpoint": self._reset_notify_date, "methods": ["GET"], "summary": "重置通知日期", "auth": "bear"},
             {"path": "/test_subscribe", "endpoint": self._test_subscribe, "methods": ["GET"], "summary": "测试订阅功能", "auth": "bear"},
         ]
 
@@ -500,8 +485,9 @@ class HotTVAndMovies(_PluginBase):
                             {"component": "VBtn", "props": {
                                 "size": "x-small", "variant": "text", "color": "orange",
                                 "prepend-icon": "mdi-database-search", "target": "_blank",
-                                "href": anime.get("mikan_link") or f"https://mikanime.tv/Home/Search?searchstr={quote(title)}",
-                            }, "text": "蜜柑"},
+                                "href": f"https://www.themoviedb.org/{'tv' if anime.get('media_type') == 'tv' else 'movie'}/{tmdb_id}" if tmdb_id else "",
+                                "disabled": not tmdb_id,
+                            }, "text": "TMDB"},
                         ]},
                         {"component": "div", "props": {"class": "text-caption text-grey mt-1", "style": "line-height:1.4;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden"},
                          "text": overview + "..." if len(overview) >= 80 else overview},
@@ -537,54 +523,22 @@ class HotTVAndMovies(_PluginBase):
             if self._min_year > 0:
                 anime_list = [a for a in anime_list if int(a.get("year", "0") or "0") >= self._min_year]
 
-            # 更新通知（基于数据变化，避免异常重复推送）
+            # 每次刷新推送通知（按星期几匹配今天更新的剧集，不限次数）
             if self._notify_new:
-                # 检查最小间隔时间（1小时），避免异常重复推送
-                current_time = time.time()
-                min_interval = 3600  # 1小时
-                if current_time - self._last_notify_time < min_interval:
-                    logger.info(f"距离上次通知不足{min_interval//3600}小时，跳过")
+                # 筛选今天播出的内容（按星期几匹配）
+                today_weekday = datetime.now().isoweekday()  # 1=周一 ... 7=周日
+                today_items = [a for a in anime_list if a.get("air_weekday") == today_weekday]
+                if today_items:
+                    # 按评分排序
+                    today_items.sort(key=lambda a: a.get("rating", 0), reverse=True)
+                    titles = "\n".join([f"· {a.get('title')} ★{a.get('rating', 0)}" for a in today_items[:10]])
+                    title_text = f"[热门TV与电影] 今日更新 ({len(today_items)}部)"
                 else:
-                    # 用持久化的上次列表做比对，避免缓存过期导致全量推送
-                    saved_list = self.get_data("last_anime_titles") or []
-                    saved_titles = set(saved_list)
-                    today = datetime.now().strftime("%Y-%m-%d")
-                    new_anime = [a for a in anime_list if a.get("title") and a["title"] not in saved_titles and a.get("air_date", "")[:10] == today]
-                    if new_anime:
-                        today = datetime.now().strftime("%Y-%m-%d")
-                        def get_air_desc(ad):
-                            if not ad:
-                                return "未知"
-                            try:
-                                ad_date = datetime.strptime(ad[:10], "%Y-%m-%d").date()
-                                today_date = datetime.now().date()
-                                diff = (ad_date - today_date).days
-                                if diff == 0:
-                                    return "今天播出"
-                                elif diff == 1:
-                                    return "明天"
-                                elif 2 <= diff <= 6:
-                                    weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
-                                    return weekdays[ad_date.weekday()]
-                                else:
-                                    return ad_date.strftime("%m-%d")
-                            except:
-                                return "未知"
-                        
-                        titles = "\n".join([f"· {a.get('title')} ★{a.get('rating', 0)} | {get_air_desc(a.get('air_date', ''))}" for a in new_anime[:10]])
-                        title_text = f"{today} 今日更新 (+{len(new_anime)})"
-                        self.post_message(mtype=NotificationType.Manual, title=title_text, text=titles)
-                        self._last_notify_time = current_time
-                        try:
-                            self.save_data("last_notify_time", current_time)
-                        except Exception:
-                            pass
-                        logger.info(f"已推送更新通知，时间: {datetime.now()}")
-                    # 无论是否推送，都更新持久化列表
-                    try:
-                        self.save_data("last_anime_titles", [a.get("title", "") for a in anime_list if a.get("title")])
-                    except Exception:
-                        pass
+                    titles = "今日暂无更新"
+                    title_text = f"[热门TV与电影] 今日更新 (0部)"
+
+                self.post_message(mtype=NotificationType.Manual, title=title_text, text=titles)
+                logger.info(f"已推送每日热门通知，{len(today_items)}部更新，时间: {datetime.now()}")
 
         self._cache["anime_list"] = anime_list
         self._cache_time = now
@@ -606,18 +560,8 @@ class HotTVAndMovies(_PluginBase):
     # ==================== 数据源 ====================
 
     def _fetch_auto(self) -> List[Dict[str, Any]]:
-        tmdb_list = self._fetch_tmdb()
-        bangumi_list = self._fetch_bangumi()
-        merged: Dict[str, Dict[str, Any]] = {}
-        for a in tmdb_list:
-            k = a.get("title", "").lower().strip()
-            if k: merged[k] = a
-        for a in bangumi_list:
-            k = a.get("title", "").lower().strip()
-            if k and k not in merged:
-                merged[k] = a
-        logger.info(f"自动整合: TMDB={len(tmdb_list)}, Bangumi={len(bangumi_list)} → {len(merged)}")
-        return list(merged.values())
+        # 热门TV与电影只取真人影视，不合并番剧数据源
+        return self._fetch_tmdb()
 
     def _fetch_tmdb(self) -> List[Dict[str, Any]]:
         anime_list = []
@@ -626,7 +570,7 @@ class HotTVAndMovies(_PluginBase):
             ru = RequestUtils(proxies=settings.PROXY)
             
             # 查询所有TV剧集（按热度排序，获取更多结果）
-            tv_params = {"api_key": settings.TMDB_API_KEY, "language": "zh-CN", "first_air_date.gte": gte, "first_air_date.lte": lte, "sort_by": "popularity.desc", "page": 1}
+            tv_params = {"api_key": settings.TMDB_API_KEY, "language": "zh-CN", "without_genres": "16", "first_air_date.gte": gte, "first_air_date.lte": lte, "sort_by": "popularity.desc", "page": 1}
             tv_resp = ru.get("https://api.themoviedb.org/3/discover/tv", params=tv_params, timeout=30)
             if tv_resp:
                 tv_data = json.loads(tv_resp)
@@ -654,10 +598,26 @@ class HotTVAndMovies(_PluginBase):
                 data = json.loads(resp)
                 year = str(datetime.now().year)
                 sl = self._get_season_label()
-                for item in data:
-                    ad = item.get("date", "")
-                    if ad and year in ad:
-                        anime_list.append({"title": item.get("name", ""), "year": year, "air_date": ad, "season": sl, "rating": round(item.get("rating", {}).get("score", 0), 1), "poster": item.get("images", {}).get("large", ""), "overview": item.get("summary", "")[:120], "tmdb_id": "", "bangumi_id": str(item.get("id", "")), "subscribed": False})
+                # Bangumi 日历格式: [{"weekday": {"id": 1, ...}, "items": [...]}]
+                for day_group in data:
+                    weekday_info = day_group.get("weekday", {})
+                    weekday_id = weekday_info.get("id", 0)  # 1=周一 ... 7=周日
+                    for item in day_group.get("items", []):
+                        ad = item.get("air_date", "")
+                        if ad and year in ad:
+                            anime_list.append({
+                                "title": item.get("name", ""),
+                                "year": year,
+                                "air_date": ad,
+                                "air_weekday": weekday_id,
+                                "season": sl,
+                                "rating": round(item.get("rating", {}).get("score", 0), 1),
+                                "poster": item.get("images", {}).get("large", ""),
+                                "overview": item.get("summary", "")[:120],
+                                "tmdb_id": "",
+                                "bangumi_id": str(item.get("id", "")),
+                                "subscribed": False,
+                            })
         except Exception as e:
             logger.error(f"Bangumi 请求失败: {e}")
         return anime_list
@@ -813,15 +773,20 @@ class HotTVAndMovies(_PluginBase):
     # ==================== API ====================
 
     def _refresh_data(self) -> dict:
-        # 彻底清除所有缓存
+        # 彻底清除所有缓存和数据
         self._cache = {}
         self._cache_time = 0
         self._loading = False
-        logger.info("已清除所有缓存，开始重新获取数据")
+        # 清除持久化数据
+        try:
+            self.save_data("last_anime_titles", [])
+            logger.info("已清除所有缓存和持久化数据")
+        except Exception as e:
+            logger.warning(f"清除持久化数据失败: {e}")
         
         # 重新获取数据（会重新检查订阅状态）
         try:
-            data = self._get_media_list()
+            data = self._get_anime_list()
             logger.info(f"数据刷新完成，共 {len(data or [])} 条记录")
             return {"success": True, "count": len(data or [])}
         except Exception as e:
@@ -967,17 +932,6 @@ class HotTVAndMovies(_PluginBase):
                 db.close()
         except Exception as e:
             logger.error(f"订阅异常: {e}")
-            return {"success": False, "message": str(e)}
-
-    def _reset_notify_date(self) -> dict:
-        """重置通知日期，允许今天再次推送"""
-        try:
-            self._last_notify_date = ""
-            self.save_data("last_notify_date", "")
-            logger.info("已重置通知日期")
-            return {"success": True, "message": "已重置通知日期，今天可以再次推送"}
-        except Exception as e:
-            logger.error(f"重置通知日期失败: {e}")
             return {"success": False, "message": str(e)}
 
     def _test_subscribe(self) -> dict:
