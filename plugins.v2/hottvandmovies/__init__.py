@@ -41,7 +41,7 @@ class HotTVAndMovies(_PluginBase):
     plugin_name = "热门TV与电影"
     plugin_desc = "发现当季热门TV剧集和电影，按类型分组，一键订阅追剧。"
     plugin_icon = "mdi-movie-open"
-    plugin_version = "2.2.4"
+    plugin_version = "2.2.5"
     plugin_label = "订阅"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "hot_tv_movies_"
@@ -525,18 +525,17 @@ class HotTVAndMovies(_PluginBase):
 
             # 每次刷新推送热门内容通知
             if self._notify_new:
-                # 按评分排序，取 Top 10
+                # 按评分排序，推送全部
                 sorted_items = sorted(anime_list, key=lambda a: a.get("rating", 0), reverse=True)
-                top_items = sorted_items[:10]
-                if top_items:
-                    titles = "\n".join([f"· {a.get('title')} ★{a.get('rating', 0)}" for a in top_items])
-                    title_text = f"[热门TV与电影] 当季热门 Top{len(top_items)}"
+                if sorted_items:
+                    titles = "\n".join([f"· {a.get('title')} ★{a.get('rating', 0)}" for a in sorted_items])
+                    title_text = f"[热门TV与电影] 当季热门 ({len(sorted_items)}部)"
                 else:
                     titles = "暂无热门内容"
                     title_text = f"[热门TV与电影] 当季热门 (0部)"
 
                 self.post_message(mtype=NotificationType.Manual, title=title_text, text=titles)
-                logger.info(f"已推送热门通知，{len(top_items)}部，时间: {datetime.now()}")
+                logger.info(f"已推送热门通知，{len(sorted_items)}部，时间: {datetime.now()}")
 
         self._cache["anime_list"] = anime_list
         self._cache_time = now
