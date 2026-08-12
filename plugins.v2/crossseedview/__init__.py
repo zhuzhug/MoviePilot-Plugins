@@ -83,7 +83,7 @@ class CrossSeedView(_PluginBase):
     plugin_name = "辅种查看"
     plugin_desc = "扫描所有下载器种子，按“种子名+大小”识别辅种关系，用可折叠卡片展示辅种数量、保存路径与明细，支持交互筛选与可选删除。"
     plugin_icon = "seed.png"
-    plugin_version = "1.2.4"
+    plugin_version = "1.2.5"
     plugin_label = "下载器"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "crossseedview_"
@@ -136,10 +136,9 @@ class CrossSeedView(_PluginBase):
     # endregion
 
     def init_plugin(self, config: dict = None) -> None:
-        """初始化：读取配置，可选立即扫描一次。周期性扫描由 get_service() 交给 MP 主调度器。"""
+        """初始化：读取配置，可选立即扫描一次。"""
         if config:
             self._enabled = bool(config.get("enabled"))
-            self._cron = str(config.get("cron") or self._cron).strip() or "0 4 * * *"
             try:
                 self._min_count = max(1, int(config.get("min_count") or 2))
             except (TypeError, ValueError):
@@ -1335,20 +1334,6 @@ class CrossSeedView(_PluginBase):
                         "content": [
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "cron",
-                                            "label": "定时刷新 CRON",
-                                            "placeholder": "0 4 * * *",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
                                 "props": {"cols": 6, "md": 2},
                                 "content": [
                                     {
@@ -1540,7 +1525,6 @@ class CrossSeedView(_PluginBase):
             "include_all_tags": True,
             "allow_delete": False,
             "notify": False,
-            "cron": "0 4 * * *",
             "min_count": 2,
             "max_count": 0,
             "downloader_filter": "",
