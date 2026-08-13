@@ -83,7 +83,7 @@ class CrossSeedView(_PluginBase):
     plugin_name = "辅种查看"
     plugin_desc = "扫描所有下载器种子，按“种子名+大小”识别辅种关系，用可折叠卡片展示辅种数量、保存路径与明细，支持交互筛选与可选删除。"
     plugin_icon = "seed.png"
-    plugin_version = "1.3.2"
+    plugin_version = "1.3.3"
     plugin_label = "下载器"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "crossseedview_"
@@ -1725,7 +1725,7 @@ class CrossSeedView(_PluginBase):
                 save_paths = g.get("save_paths") or []
                 if exclude_name_kw and any(k in name_l for k in exclude_name_kw):
                     return True
-                if exclude_path_kw and any(sp in exclude_path_kw for sp in save_paths):
+                if exclude_path_kw and any(any(kw in sp for kw in exclude_path_kw) for sp in save_paths):
                     return True
                 return False
             items = [it for it in items if not _is_protected(it)]
@@ -2456,7 +2456,7 @@ class CrossSeedView(_PluginBase):
                     exclude_path_kw = self._exclude_path_keywords or []
                     is_protected = (
                         (exclude_name_kw and any(k in name_l for k in exclude_name_kw))
-                        or (exclude_path_kw and any(sp in exclude_path_kw for sp in save_paths))
+                        or (exclude_path_kw and any(any(kw in sp for kw in exclude_path_kw) for sp in save_paths))
                     )
                     if is_protected:
                         show_delete = False
