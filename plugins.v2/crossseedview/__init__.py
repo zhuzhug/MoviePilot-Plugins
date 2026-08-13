@@ -83,7 +83,7 @@ class CrossSeedView(_PluginBase):
     plugin_name = "辅种查看"
     plugin_desc = "扫描所有下载器种子，按“种子名+大小”识别辅种关系，用可折叠卡片展示辅种数量、保存路径与明细，支持交互筛选与可选删除。"
     plugin_icon = "seed.png"
-    plugin_version = "1.3.1"
+    plugin_version = "1.3.2"
     plugin_label = "下载器"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "crossseedview_"
@@ -1705,6 +1705,7 @@ class CrossSeedView(_PluginBase):
                 "count": g.get("count", 0),
                 "size": g.get("size") or 0,
                 "size_text": self._fmt_size(g.get("size") or 0),
+                "save_paths": list(g.get("save_paths") or []),
                 "save_paths_text": "\n".join(g.get("save_paths") or []) or "-",
                 "downloaders_text": "、".join(g.get("downloaders") or []) or "-",
                 "torrents": list(g.get("torrents") or []),
