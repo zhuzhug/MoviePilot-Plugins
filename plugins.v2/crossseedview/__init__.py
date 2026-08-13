@@ -83,7 +83,7 @@ class CrossSeedView(_PluginBase):
     plugin_name = "辅种查看"
     plugin_desc = "扫描所有下载器种子，按“种子名+大小”识别辅种关系，用可折叠卡片展示辅种数量、保存路径与明细，支持交互筛选与可选删除。"
     plugin_icon = "seed.png"
-    plugin_version = "1.3.4"
+    plugin_version = "1.3.5"
     plugin_label = "下载器"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "crossseedview_"
@@ -189,7 +189,16 @@ class CrossSeedView(_PluginBase):
                 epk = [epk.strip()] if epk.strip() else []
             elif not isinstance(epk, list):
                 epk = []
-            self._exclude_path_keywords = [str(p).strip() for p in epk if str(p).strip()]
+            # 兼容 VSelect 对象格式 [{"title":..., "value":...}] 和纯字符串格式
+            resolved = []
+            for item in epk:
+                if isinstance(item, dict):
+                    val = str(item.get("value") or "").strip()
+                else:
+                    val = str(item).strip()
+                if val:
+                    resolved.append(val)
+            self._exclude_path_keywords = resolved
 
         # 每次初始化/重载后页码回到第一页
         self._current_page = 1
