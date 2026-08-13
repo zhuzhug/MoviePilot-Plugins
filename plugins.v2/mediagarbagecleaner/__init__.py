@@ -24,7 +24,7 @@ class MediaGarbageCleaner(_PluginBase):
     plugin_name = "资源清理"
     plugin_desc = "扫描媒体库中的断链软链接、硬链接、重复文件、空目录与失败整理记录，支持按地址与名称保护喜欢的作品，手动或批量清理。"
     plugin_icon = "mdi-broom"
-    plugin_version = "1.6.0"
+    plugin_version = "1.6.1"
     plugin_label = "媒体整理"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "mediagarbagecleaner_"
@@ -267,7 +267,8 @@ class MediaGarbageCleaner(_PluginBase):
 
     @staticmethod
     def _item_row(key: str, title: str, subtitle: str, is_selected: bool,
-                  toggle_api: str, delete_api: str, delete_params: dict) -> dict:
+                  toggle_api: str, delete_api: str, delete_params: dict,
+                  image: str = "") -> dict:
         """圆角描边列表行，选中态强对比高亮（深浅主题均明显）。
 
         参考辅种查看 v0.5.13 的教训：Vuetify VBtn 的 ``variant="text"`` + 图标色相近时
@@ -328,10 +329,17 @@ class MediaGarbageCleaner(_PluginBase):
         list_props: Dict[str, Any] = {"density": "compact", "class": row_class}
         if row_style:
             list_props["style"] = row_style
+        row_content = [checkbox]
+        if image:
+            row_content.append({
+                "component": "VImg",
+                "props": {"src": image, "width": 36, "height": 50, "cover": True, "class": "rounded mr-2", "style": "flex-shrink: 0;"},
+            })
+        row_content.extend([title_block, sub_block, {"component": "VSpacer"}, delete_btn])
         return {
             "component": "VListItem",
             "props": list_props,
-            "content": [checkbox, title_block, sub_block, {"component": "VSpacer"}, delete_btn],
+            "content": row_content,
         }
 
     def get_page(self) -> Optional[List[dict]]:
@@ -463,6 +471,7 @@ class MediaGarbageCleaner(_PluginBase):
                     key=key, title=title, subtitle=(item.get("errmsg", "") or "")[:80],
                     is_selected=key in selected, toggle_api=toggle_api,
                     delete_api=delete_api, delete_params={"type": "failed_transfer", "id": item.get("id")},
+                    image=item.get("image", ""),
                 ))
             page.append(self._section_card("失败整理记录", "mdi-alert-circle-outline", "info", len(failed), rows, header_actions=cat_sel("f")))
 
@@ -709,6 +718,7 @@ class MediaGarbageCleaner(_PluginBase):
                         "id": item.id, "title": title, "year": item.year or "",
                         "src": item.src or "", "dest": item.dest or "", "errmsg": item.errmsg or "",
                         "date": str(item.date) if item.date else "", "item_type": "failed_transfer",
+                        "image": item.image or "", "tmdbid": item.tmdbid or 0,
                     })
             finally:
                 db.close()
