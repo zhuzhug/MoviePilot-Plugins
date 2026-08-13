@@ -18,6 +18,7 @@ from app.log import logger
 from app.plugins import _PluginBase
 from app.schemas import NotificationType, Response
 from app.schemas.types import EventType
+from app.plugins.crossseedview.media_title_extractor import extract_media_title, normalize_title
 
 
 class SaveFiltersParams(BaseModel):
@@ -82,7 +83,7 @@ class CrossSeedView(_PluginBase):
     plugin_name = "辅种查看"
     plugin_desc = "扫描所有下载器种子，按“种子名+大小”识别辅种关系，用可折叠卡片展示辅种数量、保存路径与明细，支持交互筛选与可选删除。"
     plugin_icon = "seed.png"
-    plugin_version = "1.2.5"
+    plugin_version = "1.3.0"
     plugin_label = "下载器"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "crossseedview_"
@@ -107,6 +108,7 @@ class CrossSeedView(_PluginBase):
     _sort_by: str = "count"  # 排序字段: count/size/name/seeding_time/uploaded
     _sort_order: str = "desc"  # 排序方向: desc/asc
     _view_mode: str = "group"  # 视图模式: group(按分组) / downloader(按下载器聚合)
+    _group_mode: str = "name_size"  # 分组模式: name_size(种子名+大小) / media_title(按媒体标题)
     # 排除名单（保护配置，匹配的种子整组不进入可删除集合，不被 clear_filters 清除）
     _exclude_name_keywords: List[str] = None  # 名称关键词（| 分隔，不区分大小写）
     _exclude_path_keywords: List[str] = None  # 保存路径关键词（精确匹配，多选）
@@ -171,6 +173,7 @@ class CrossSeedView(_PluginBase):
             self._sort_by = str(config.get("sort_by") or "count").strip() or "count"
             self._sort_order = str(config.get("sort_order") or "desc").strip() or "desc"
             self._view_mode = str(config.get("view_mode") or "group").strip() or "group"
+            self._group_mode = str(config.get("group_mode") or "name_size").strip() or "name_size"
             # 排除名单：读取逗号/列表形式，归一为字符串列表
             enk = config.get("exclude_name_keywords") or ""
             if isinstance(enk, str):
@@ -1327,6 +1330,23 @@ class CrossSeedView(_PluginBase):
                                     }
                                 ],
                             },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 3},
+                                "content": [
+                                    {
+                                        "component": "VSelect",
+                                        "props": {
+                                            "model": "group_mode",
+                                            "label": "分组模式",
+                                            "items": [
+                                                {"title": "种子名+大小（传统）", "value": "name_size"},
+                                                {"title": "媒体标题（按番名）", "value": "media_title"},
+                                            ],
+                                        },
+                                    }
+                                ],
+                            },
                         ],
                     },
                     {
@@ -1509,7 +1529,8 @@ class CrossSeedView(_PluginBase):
                             "type": "info",
                             "variant": "tonal",
                             "text": (
-                                "扫描规则：按“种子名 + 文件大小”跨下载器分组，同组视为辅种。"
+                                "分组模式：\"种子名+大小\"按相同种子名和大小分组（传统辅种）；"
+                                "\"媒体标题\"自动提取番名/剧名，同一部作品的所有种子归为一组，方便整体删除。"
                                 "筛选项支持组合：辅种数上下限 / 下载器 / 名称关键词(|分隔多个) / "
                                 "保存路径关键词 / 大小区间。修改后保存并重载即可生效，不需重新扫描。"
                                 "「排除名称关键词 / 排除保存路径」为保护名单，匹配的种子整组不会被列为可删除项。"
@@ -1534,6 +1555,7 @@ class CrossSeedView(_PluginBase):
             "size_max_gb": 0,
             "exclude_name_keywords": "",
             "exclude_path_keywords": [],
+            "group_mode": "name_size",
         }
         return form, defaults
 
@@ -2410,6 +2432,19 @@ class CrossSeedView(_PluginBase):
                 show_delete = self._allow_delete
                 torrents = it.get("torrents") or []
                 name_text = it["name"]
+
+                # 检查该组是否在排除（保护）名单中，受保护的组不显示删除按钮
+                if show_delete:
+                    name_l = name_text.lower()
+                    save_paths = it.get("save_paths") or []
+                    exclude_name_kw = self._exclude_name_keywords or []
+                    exclude_path_kw = self._exclude_path_keywords or []
+                    is_protected = (
+                        (exclude_name_kw and any(k in name_l for k in exclude_name_kw))
+                        or (exclude_path_kw and any(sp in exclude_path_kw for sp in save_paths))
+                    )
+                    if is_protected:
+                        show_delete = False
                 # 检查是否有中文翻译
                 cn_name = self._translation_cache.get(name_text, "")
                 # 组头复选框：计算组的选中状态
@@ -2967,10 +3002,16 @@ class CrossSeedView(_PluginBase):
                 errors.append(f"{dl_name}: {err}")
                 torrents_by_dl[dl_name] = []
 
-        # 按 (name, size) 聚合
-        groups_map: Dict[Tuple[str, int], Dict[str, Any]] = defaultdict(
+        # 根据分组模式选择聚合键
+        # name_size: 按 (种子名, 文件大小) 聚合，传统辅种分组
+        # media_title: 按媒体标题聚合，同一部番/剧的所有种子归为一组
+        use_media_title = (self._group_mode or "name_size") == "media_title"
+
+        # 聚合结构
+        groups_map: Dict[str, Dict[str, Any]] = defaultdict(
             lambda: {
-                "name": "",
+                "name": "",  # 显示名（种子名或媒体标题）
+                "original_names": [],  # 原始种子名列表（媒体标题模式下使用）
                 "size": 0,
                 "count": 0,
                 "downloaders": set(),
@@ -2982,6 +3023,13 @@ class CrossSeedView(_PluginBase):
             }
         )
         total_torrents = 0
+        excluded_torrents = 0  # 被排除名单剔除的种子数
+        media_title_count = 0  # 媒体标题模式下成功提取的数量
+
+        # 预处理排除名单
+        exclude_name_kw = [k.lower() for k in (self._exclude_name_keywords or [])]
+        exclude_path_kw = self._exclude_path_keywords or []
+
         for dl_name, tors in torrents_by_dl.items():
             for t in tors:
                 try:
@@ -2991,10 +3039,37 @@ class CrossSeedView(_PluginBase):
                     continue
                 if not name or size <= 0:
                     continue
+
+                # 排除名单：在扫描阶段就剔除，不纳入分组统计
+                name_lower = name.lower()
+                name_hit = any(k in name_lower for k in exclude_name_kw)
+                path_hit = save_path and save_path in exclude_path_kw
+                if name_hit or path_hit:
+                    excluded_torrents += 1
+                    continue
+
                 total_torrents += 1
-                key = (name, size)
+
+                if use_media_title:
+                    # 按媒体标题分组
+                    media_title = extract_media_title(name)
+                    if media_title:
+                        # 提取成功，用归一化标题作为分组键
+                        key = f"media:{normalize_title(media_title)}"
+                        media_title_count += 1
+                    else:
+                        # 提取失败，回退到种子名+大小
+                        key = f"name:{name}|{size}"
+                else:
+                    # 传统模式：按种子名+大小分组
+                    key = f"name:{name}|{size}"
+
                 entry = groups_map[key]
-                entry["name"] = name
+                if use_media_title and media_title:
+                    entry["name"] = media_title
+                    entry["original_names"].append(name)
+                else:
+                    entry["name"] = name
                 entry["size"] = size
                 entry["count"] += 1
                 entry["downloaders"].add(dl_name)
@@ -3007,6 +3082,7 @@ class CrossSeedView(_PluginBase):
                     "state": state,
                     "seeding_time": seeding_time,
                     "uploaded": uploaded,
+                    "original_name": name,
                 })
                 if seeding_time > entry["max_seeding_time"]:
                     entry["max_seeding_time"] = seeding_time
@@ -3035,6 +3111,7 @@ class CrossSeedView(_PluginBase):
                 "max_seeding_time": entry["max_seeding_time"],
                 "total_uploaded": entry["total_uploaded"],
                 "state": rep_state,
+                "original_names": list(set(entry.get("original_names") or [])),
             }
             groups.append(g)
             total_uploaded_all += entry["total_uploaded"]
@@ -3043,6 +3120,12 @@ class CrossSeedView(_PluginBase):
                 redundant_bytes += g["size"] * (g["count"] - 1)
             else:
                 orphan_groups += 1
+
+        # 统计信息
+        exclude_info = f"，排除名单剔除 {excluded_torrents}" if excluded_torrents else ""
+        media_title_info = ""
+        if use_media_title:
+            media_title_info = f"，媒体标题提取成功 {media_title_count}/{total_torrents}"
 
         snapshot = {
             "groups": groups,
@@ -3066,6 +3149,7 @@ class CrossSeedView(_PluginBase):
         logger.info(
             f"[CrossSeedView] 扫描完成：下载器 {len(downloader_names)}，"
             f"种子 {total_torrents}，分组 {len(groups)}，辅种组 {cross_groups}"
+            f"{exclude_info}{media_title_info}"
         )
 
     @staticmethod
