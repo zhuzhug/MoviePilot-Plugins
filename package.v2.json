@@ -1,12 +1,15 @@
 {
   "CrossSeedView": {
     "name": "辅种查看",
-    "description": "跨下载器识别辅种，支持筛选、批量删种与媒体库链接联动清理。",
+    "description": "跨下载器识别辅种，支持按媒体标题分组、筛选、批量删种与媒体库链接联动清理。",
     "labels": "订阅",
     "version": "1.3.6",
     "icon": "mdi-magnify",
     "author": "zhuzhug",
-    "level": 1
+    "level": 1,
+    "history": {
+      "v1.3.6": "新增按媒体标题分组功能，支持自动提取番名/剧名进行分组，排除名单在扫描阶段生效。"
+    }
   },
   "MediaGarbageCleaner": {
     "name": "资源清理",
