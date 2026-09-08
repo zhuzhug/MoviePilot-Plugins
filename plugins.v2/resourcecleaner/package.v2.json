@@ -1,0 +1,1 @@
+{"ResourceCleaner":{"author":"local","description":"扫描源目录、下载器种子与媒体库软链接，分类展示资源状态并支持清理孤立文件和幽灵种子。","history":{"v1.0.0":"初始版本"},"icon":"resourcecleaner.png","labels":"资源管理,清理,分析","level":1,"name":"资源清理","system_version":"\u003e=2.12.0","version":"1.0.0"}}
