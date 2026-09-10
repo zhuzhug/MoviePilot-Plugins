@@ -43,7 +43,7 @@ class AnimeDiscovery(_PluginBase):
     plugin_name = "当季新番"
     plugin_desc = "发现当季新番，按日期分组，一键订阅追番。"
     plugin_icon = "mdi-play-circle"
-    plugin_version = "2.14.8"
+    plugin_version = "2.15.1"
     plugin_label = "订阅"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "anime_discovery_"
@@ -137,6 +137,7 @@ class AnimeDiscovery(_PluginBase):
                                 {"title": "TMDB", "value": "tmdb"},
                                 {"title": "Bangumi", "value": "bangumi"},
                                 {"title": "蜜柑", "value": "mikan"},
+                                {"title": "番组百科", "value": "anibk"},
                             ],
                         }}
                     ]},
@@ -526,6 +527,8 @@ class AnimeDiscovery(_PluginBase):
             anime_list = self._fetch_mikan()
         elif self._data_source == "bangumi":
             anime_list = self._fetch_bangumi()
+        elif self._data_source == "anibk":
+            anime_list = self._fetch_anibk()
         else:
             anime_list = self._fetch_tmdb()
 
@@ -586,6 +589,7 @@ class AnimeDiscovery(_PluginBase):
         tmdb_list = self._fetch_tmdb()
         bangumi_list = self._fetch_bangumi()
         mikan_list = self._fetch_mikan()
+        anibk_list = self._fetch_anibk()
         merged: Dict[str, Dict[str, Any]] = {}
         for a in tmdb_list:
             k = a.get("title", "").lower().strip()
@@ -604,7 +608,15 @@ class AnimeDiscovery(_PluginBase):
                     merged[k]["mikan_link"] = a.get("mikan_link", "")
             else:
                 merged[k] = a
-        logger.info(f"自动整合: TMDB={len(tmdb_list)}, Bangumi={len(bangumi_list)}, 蜜柑={len(mikan_list)} → {len(merged)}")
+        for a in anibk_list:
+            k = a.get("title", "").lower().strip()
+            if not k: continue
+            if k in merged:
+                if not merged[k].get("anibk_link"):
+                    merged[k]["anibk_link"] = a.get("anibk_link", "")
+            else:
+                merged[k] = a
+        logger.info(f"自动整合: TMDB={len(tmdb_list)}, Bangumi={len(bangumi_list)}, 蜜柑={len(mikan_list)}, 番组百科={len(anibk_list)} → {len(merged)}")
         return list(merged.values())
 
     def _fetch_tmdb(self) -> List[Dict[str, Any]]:
@@ -672,6 +684,74 @@ class AnimeDiscovery(_PluginBase):
             logger.error(f"蜜柑请求失败: {e}")
         return anime_list
 
+    def _fetch_anibk(self) -> List[Dict[str, Any]]:
+        """从番组百科（anibk.com）抓取当季新番列表。"""
+        anime_list = []
+        try:
+            ru = RequestUtils(proxies=settings.PROXY)
+            now = datetime.now()
+            # 年份码 = 年份 - 1968（如 2026 → 58）
+            year_code = now.year - 1968
+            month = now.month
+            if month <= 3:
+                season_code = 1  # 冬
+            elif month <= 6:
+                season_code = 2  # 春
+            elif month <= 9:
+                season_code = 3  # 夏
+            else:
+                season_code = 4  # 秋
+            year = str(now.year)
+            sl = self._get_season_label()
+
+            # 抓取所有分页（每页 24 条，最多 5 页）
+            for page in range(5):
+                url = f"https://www.anibk.com/list/---{year_code}-{season_code}-----?rs=1&index={page}&size=24"
+                resp = ru.get(url, timeout=30)
+                if not resp:
+                    break
+                # 按 <li> 块分割
+                blocks = re.findall(r'<li>\s*<div class="vsub">.*?</li>', resp, re.S)
+                if not blocks:
+                    break
+                page_count = 0
+                for block in blocks:
+                    title_m = re.search(r'<a class="title" title="([^"]+)" href="/bk/(\d+)"', block)
+                    if not title_m:
+                        continue
+                    title = html.unescape(title_m.group(1)).strip()
+                    anibk_id = title_m.group(2)
+                    # 状态和日期
+                    status_m = re.search(r'<a class="small" href="javascript:;">([^<]+)</a>', block)
+                    date_m = re.search(r'<a class="small" title="([^"]+)" href="javascript:;">', block)
+                    status = status_m.group(1).strip() if status_m else ""
+                    air_date = date_m.group(1).strip() if date_m else ""
+                    # 去重
+                    if any(a.get("anibk_id") == anibk_id for a in anime_list):
+                        continue
+                    anime_list.append({
+                        "title": title,
+                        "year": year,
+                        "air_date": air_date,
+                        "season": sl,
+                        "rating": 0,
+                        "poster": "",
+                        "overview": f"番组百科 · {title}",
+                        "tmdb_id": "",
+                        "bangumi_id": "",
+                        "anibk_link": f"https://www.anibk.com/bk/{anibk_id}",
+                        "anibk_id": anibk_id,
+                        "media_type": "tv",
+                        "subscribed": False,
+                    })
+                    page_count += 1
+                if page_count < 24:
+                    break
+            logger.info(f"番组百科抓取完成: {len(anime_list)} 部当季新番")
+        except Exception as e:
+            logger.error(f"番组百科请求失败: {e}")
+        return anime_list
+
     # ==================== AI 增强 ====================
 
     def _enhance_with_llm(self, anime_list: List[Dict[str, Any]]) -> None:
@@ -734,18 +814,23 @@ class AnimeDiscovery(_PluginBase):
         try:
             from app.db import ScopedSession
             from app.db.models.subscribe import Subscribe
+            from app.db.models.subscribehistory import SubscribeHistory
             db = ScopedSession()
             try:
                 # R=运行中, N=新建待调度，都算已订阅
                 subs = db.query(Subscribe).filter(Subscribe.state.in_(["R", "N"]), Subscribe.type.in_(["电视剧", "电影"])).all()
                 sub_ids = {s.tmdbid for s in subs if s.tmdbid}
                 sub_names = {s.name for s in subs if s.name}
+                # 已完成订阅历史也标记为已订阅
+                history_subs = db.query(SubscribeHistory).all()
+                history_ids = {h.tmdbid for h in history_subs if h.tmdbid}
                 for a in anime_list:
                     # 按 tmdb_id 匹配
                     tmdb_id = a.get("tmdb_id")
                     if tmdb_id:
                         try:
-                            if int(tmdb_id) in sub_ids:
+                            tid = int(tmdb_id)
+                            if tid in sub_ids or tid in history_ids:
                                 a["subscribed"] = True
                                 continue
                         except (ValueError, TypeError):
@@ -796,6 +881,72 @@ class AnimeDiscovery(_PluginBase):
         self._cache = {}; self._cache_time = 0
         self._get_anime_list()
 
+    def _get_latest_season(self, tmdb_id: int) -> Optional[int]:
+        """从 TMDB 获取最新季号（排除 season 0 特别篇）"""
+        try:
+            ru = RequestUtils(proxies=settings.PROXY)
+            url = f"https://api.themoviedb.org/3/tv/{tmdb_id}"
+            resp = ru.get(url, params={"api_key": settings.TMDB_API_KEY, "language": "zh-CN"}, timeout=10)
+            if resp:
+                data = json.loads(resp)
+                seasons = data.get("seasons", [])
+                normal_seasons = [s for s in seasons if s.get("season_number", 0) > 0]
+                if normal_seasons:
+                    latest = max(s.get("season_number", 1) for s in normal_seasons)
+                    logger.info(f"TMDB 最新季号: tmdbid={tmdb_id} season={latest}")
+                    return latest
+                return 1
+        except Exception as e:
+            logger.warning(f"获取季数失败: {e}")
+        return None
+
+    def _is_season_subscribed(self, tmdb_id: Optional[Union[str, int]], season: Optional[int]) -> bool:
+        """检查指定季是否已有活跃订阅或已完成订阅"""
+        try:
+            from app.db import ScopedSession
+            from app.db.models.subscribe import Subscribe
+            from app.db.models.subscribehistory import SubscribeHistory
+            db = ScopedSession()
+            try:
+                if tmdb_id:
+                    tid = int(tmdb_id)
+                    # 活跃订阅（R/N 状态）
+                    active = db.query(Subscribe).filter(
+                        Subscribe.tmdbid == tid,
+                        Subscribe.state.in_(["R", "N"]),
+                    ).all()
+                    if season is not None:
+                        if any(s.season == season for s in active):
+                            logger.info(f"第{season}季已有活跃订阅: tmdbid={tid}")
+                            return True
+                    elif active:
+                        logger.info(f"已存在活跃订阅: tmdbid={tid}")
+                        return True
+                    # 已完成的订阅历史
+                    history = db.query(SubscribeHistory).filter(
+                        SubscribeHistory.tmdbid == tid,
+                    ).all()
+                    if season is not None:
+                        if any(h.season == season for h in history):
+                            logger.info(f"第{season}季已完成订阅: tmdbid={tid}")
+                            return True
+            finally:
+                db.close()
+        except Exception as e:
+            logger.warning(f"检查订阅状态失败: {e}")
+        return False
+
+    def _save_mikan_map(self, mikan_id, sid):
+        """保存蜜柑ID到订阅ID的映射"""
+        if not mikan_id:
+            return
+        try:
+            mikan_map = self.get_data("mikan_subscription_map") or {}
+            mikan_map[str(mikan_id)] = sid
+            self.save_data("mikan_subscription_map", mikan_map)
+        except Exception as e:
+            logger.warning(f"保存蜜柑映射失败: {e}")
+
     def _subscribe_anime(self, params: SubscribeParams) -> dict:
         title = params.title
         year = params.year
@@ -804,16 +955,23 @@ class AnimeDiscovery(_PluginBase):
         mikan_id = params.mikan_id
         if not title: return {"success": False, "message": "缺少标题"}
         logger.info(f"收到订阅请求: title={title}, year={year}, tmdb_id={tmdb_id}, bangumi_id={bangumi_id}, mikan_id={mikan_id}")
+
+        mtype = MediaType.MOVIE if params.media_type == "movie" else MediaType.TV
+
+        # 对电视剧，从 TMDB 获取最新季号，避免默认订阅第 1 季
+        season = None
+        if mtype == MediaType.TV and tmdb_id:
+            try:
+                season = self._get_latest_season(int(tmdb_id))
+            except Exception as e:
+                logger.warning(f"获取季数异常，回退默认: {e}")
+
+        # 检查该季是否已订阅或已完成
+        if self._is_season_subscribed(tmdb_id, season):
+            season_desc = f"第{season}季" if season else "已有"
+            return {"success": False, "message": f"{title} {season_desc}已订阅或已完成，无需重复订阅"}
+
         try:
-            # 使用 MP 订阅系统，支持自动搜刮下载
-            # 根据媒体类型选择订阅类型
-            if params.media_type == "movie":
-                mtype = MediaType.MOVIE
-                season = None
-            else:
-                mtype = MediaType.TV
-                season = 1
-            
             sid, msg = SubscribeChain().add(
                 title=title,
                 year=year,
@@ -826,71 +984,58 @@ class AnimeDiscovery(_PluginBase):
             logger.info(f"订阅结果: sid={sid}, msg={msg}")
             if sid:
                 self._cache = {}; self._cache_time = 0
-                # 保存蜜柑ID到本地映射表
-                if params.mikan_id:
-                    try:
-                        mikan_map = self.get_data("mikan_subscription_map") or {}
-                        mikan_map[params.mikan_id] = sid
-                        self.save_data("mikan_subscription_map", mikan_map)
-                    except Exception as e:
-                        logger.warning(f"保存蜜柑映射失败: {e}")
-                return {"success": True, "message": f"已订阅 {title}，{msg}"}
+                self._save_mikan_map(mikan_id, sid)
+                season_info = f" 第{season}季" if season else ""
+                return {"success": True, "message": f"已订阅 {title}{season_info}，{msg}"}
             else:
                 # 订阅失败，尝试用标题搜索TMDB获取正确的TMDB ID
                 logger.info(f"订阅失败，尝试TMDB搜索: {title}")
                 try:
-                    # 搜索TMDB
                     search_url = "https://api.themoviedb.org/3/search/multi"
-                    params = {
+                    api_params = {
                         "api_key": settings.TMDB_API_KEY,
                         "language": "zh-CN",
                         "query": title,
                         "page": 1
                     }
                     ru = RequestUtils(proxies=settings.PROXY)
-                    resp = ru.get(search_url, params=params, timeout=10)
+                    resp = ru.get(search_url, params=api_params, timeout=10)
                     if resp:
                         data = json.loads(resp)
                         results = data.get("results", [])
                         logger.info(f"TMDB搜索结果: 标题='{title}', 找到{len(results)}个结果")
-                        # 查找最匹配的结果
                         for result in results[:5]:
                             result_title = result.get("name") or result.get("title", "")
                             result_type = result.get("media_type", "")
                             result_id = result.get("id")
-                            # 检查标题相似度
                             if title.lower() in result_title.lower() or result_title.lower() in title.lower():
                                 logger.info(f"TMDB搜索到匹配: {result_title} (ID: {result_id}, 类型: {result_type})")
-                                # 根据类型确定订阅类型
-                                if result_type == "movie":
-                                    mtype = MediaType.MOVIE
-                                    season = None
-                                else:
-                                    mtype = MediaType.TV
-                                    season = 1
-                                # 重新订阅
+                                mtype2 = MediaType.MOVIE if result_type == "movie" else MediaType.TV
+                                # 对电视剧尝试获取最新季号
+                                fallback_season = None
+                                if mtype2 == MediaType.TV:
+                                    try:
+                                        fallback_season = self._get_latest_season(result_id)
+                                    except Exception as e:
+                                        logger.warning(f"回退搜索获取季数异常: {e}")
+                                # 检查回退季号是否已订阅
+                                if self._is_season_subscribed(result_id, fallback_season):
+                                    continue
                                 sid2, msg2 = SubscribeChain().add(
                                     title=title,
                                     year=year,
-                                    mtype=mtype,
+                                    mtype=mtype2,
                                     tmdbid=result_id,
-                                    season=season,
+                                    season=fallback_season,
                                     message=True,
                                 )
                                 if sid2:
-                                    # 保存蜜柑ID映射
-                                    if params.mikan_id:
-                                        try:
-                                            mikan_map = self.get_data("mikan_subscription_map") or {}
-                                            mikan_map[params.mikan_id] = sid2
-                                            self.save_data("mikan_subscription_map", mikan_map)
-                                        except Exception as e:
-                                            logger.warning(f"保存蜜柑映射失败: {e}")
                                     self._cache = {}; self._cache_time = 0
-                                    return {"success": True, "message": f"已订阅 {title}（通过TMDB搜索匹配），{msg2}"}
+                                    self._save_mikan_map(mikan_id, sid2)
+                                    season_info = f" 第{fallback_season}季" if fallback_season else ""
+                                    return {"success": True, "message": f"已订阅 {title}{season_info}（通过TMDB搜索匹配），{msg2}"}
                 except Exception as e:
                     logger.warning(f"TMDB搜索异常: {e}")
-                # 搜索失败，返回原始错误
                 return {"success": False, "message": msg or "订阅失败"}
         except Exception as e:
             logger.warning(f"订阅异常: {e}")
