@@ -23,9 +23,10 @@ class MediaGarbageCleaner(_PluginBase):
     """资源清理插件（原名：媒体垃圾扫描）。"""
 
     plugin_name = "资源清理"
-    plugin_desc = "扫描媒体库中的断链软链接、硬链接、重复文件、空目录与失败整理记录，支持按地址与名称保护喜欢的作品，手动或批量清理。"
+    plugin_desc = "扫描媒体库中的断链软链接、硬链接、重复文件、空目录、孤儿 strm、未整理资源与失败记录，支持联动清理关联数据库记录，按地址与名称保护喜欢的作品，手动或批量清理。"
     plugin_icon = "mdi-broom"
-    plugin_version = "1.6.2"
+    plugin_version = "1.7.1"
+    plugin_label = "媒体整理"
     plugin_label = "媒体整理"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "mediagarbagecleaner_"
@@ -41,6 +42,10 @@ class MediaGarbageCleaner(_PluginBase):
     _orphan_scan_enabled: bool = False  # 孤儿 strm 扫描
     _orphan_scan_source_dirs: List[str] = []  # 源目录白名单
     _orphan_scan_keep_disks: List[str] = []  # 保留的网盘名关键词
+    _cascade_cleanup: bool = True  # 联动删除：删除文件时同步清理关联数据库记录和刮削残留
+    _untransfer_scan_enabled: bool = False  # 下载目录未整理资源扫描
+    _untransfer_exclude_dirs: List[str] = []  # 未整理资源排除目录
+    _untransfer_exclude_keywords: str = ""  # 未整理资源排除关键词（文件名/父目录名包含则跳过）
     _scan_results: Dict[str, Any] = {}
     _selected: Dict[str, str] = {}  # 已选中的项目 key -> 标识符
 
@@ -51,12 +56,19 @@ class MediaGarbageCleaner(_PluginBase):
         self._exclude_dirs = []
         self._scan_results = {}
         self._selected = {}
+        self._untransfer_scan_enabled = False
+        self._untransfer_exclude_dirs = []
+        self._untransfer_exclude_keywords = ""
         self._orphan_scan_enabled = False
         self._orphan_scan_source_dirs = []
         self._orphan_scan_keep_disks = []
         if not config:
             return
         self._enabled = bool(config.get("enabled"))
+        self._cascade_cleanup = bool(config.get("cascade_cleanup", True))
+        self._untransfer_scan_enabled = bool(config.get("untransfer_scan_enabled", False))
+        self._untransfer_exclude_dirs = self._normalize_path_list(config.get("untransfer_exclude_dirs") or [])
+        self._untransfer_exclude_keywords = str(config.get("untransfer_exclude_keywords") or "")
         exclude = config.get("exclude_dirs") or []
         self._exclude_dirs = self._normalize_path_list(exclude)
         # 名称保护名单：喜欢的电影/剧集按名称关键词保护，命中名称的不扫描/不展示/不删
@@ -115,6 +127,7 @@ class MediaGarbageCleaner(_PluginBase):
                 "content": [
                     {"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件"}},
                     {"component": "VSwitch", "props": {"model": "dup_only_video", "label": "重复检测仅限视频类（占空间资源，跳过图片/字幕等小文件）"}},
+                    {"component": "VSwitch", "props": {"model": "cascade_cleanup", "label": "联动删除（删除断链/孤儿 strm 时同步清理关联数据库记录和刮削残留）"}},
                     {"component": "VCombobox", "props": {
                         "model": "exclude_dirs",
                         "label": "排除目录（按地址过滤，不扫描/不清理这些地址下的内容）",
@@ -133,6 +146,25 @@ class MediaGarbageCleaner(_PluginBase):
                         "placeholder": "如: 寻梦环游记|鬼灭之刃|权力的游戏",
                     }},
                     {"component": "VSwitch", "props": {"model": "orphan_scan_enabled", "label": "孤儿 strm 扫描（源目录已删除但媒体库仍有残留的 strm/nfo）"}},
+                    {"component": "VSwitch", "props": {"model": "untransfer_scan_enabled", "label": "下载目录未整理资源扫描（从未经整理的媒体文件，可能是堆积垃圾）"}},
+                    {"component": "VCombobox", "props": {
+                        "model": "untransfer_exclude_dirs",
+                        "label": "未整理资源排除目录（这些目录下的文件不参与扫描）",
+                        "items": self._untransfer_exclude_options(),
+                        "multiple": True,
+                        "chips": True,
+                        "clearable": True,
+                        "deletableChips": True,
+                        "delimiters": [",", "\n"],
+                        "placeholder": "如: /media/downloads/BT下载/保种契约勿删",
+                    }},
+                    {"component": "VTextField", "props": {
+                        "model": "untransfer_exclude_keywords",
+                        "label": "未整理资源排除关键词（| 分隔，文件名或父目录名包含则跳过）",
+                        "clearable": True,
+                        "placeholder": "如: 保种|种子|seed",
+                        "hint": "不区分大小写，匹配文件名和父目录名",
+                    }},
                     {"component": "VCombobox", "props": {
                         "model": "orphan_scan_source_dirs",
                         "label": "源目录列表（按此目录里存在的 strm 判断整理目录里哪些是孤儿）",
@@ -153,8 +185,8 @@ class MediaGarbageCleaner(_PluginBase):
                     }},
                 ],
             }
-        ], {"enabled": False, "exclude_dirs": [], "dup_only_video": True, "protect_name_keywords": "",
-            "orphan_scan_enabled": False, "orphan_scan_source_dirs": [], "orphan_scan_keep_disks": ""}
+        ], {"enabled": False, "exclude_dirs": [], "dup_only_video": True, "cascade_cleanup": True, "protect_name_keywords": "",
+            "orphan_scan_enabled": False, "orphan_scan_source_dirs": [], "orphan_scan_keep_disks": "", "untransfer_scan_enabled": False}
 
     def _exclude_dir_options(self) -> List[Dict[str, str]]:
         """构建排除目录下拉选项：媒体库根目录 + 已扫描结果中出现过的父目录。"""
@@ -237,29 +269,26 @@ class MediaGarbageCleaner(_PluginBase):
                         candidates.append(v)
         except Exception:
             pass
-        for cand_root in ["/media/downloads", "/downloads", "/media"]:
-            if os.path.isdir(cand_root):
-                try:
-                    for entry in os.listdir(cand_root):
-                        p = os.path.join(cand_root, entry)
-                        if os.path.isdir(p):
-                            candidates.append(p)
-                except Exception:
-                    pass
-        seen = set()
-        opts = []
-        for c in candidates:
-            c = c.strip()
-            if c and c not in seen:
-                seen.add(c)
-                opts.append({"title": c, "value": c})
-        return opts
+        return [{"title": p, "value": p} for p in sorted(set(candidates)) if p]
 
-    # ==================== 详情页仪表盘样式辅助方法 ====================
-    # 视觉风格对齐「MP 运维助手」：tonal 统计卡 + 网格动作按钮 + 圆角描边列表行
+    def _untransfer_exclude_options(self) -> List[Dict[str, str]]:
+        """构建未整理资源排除目录下拉选项：下载目录 + 已扫描结果中出现过的父目录。"""
+        candidates: List[str] = []
+        try:
+            from app.db.directory_oper import DirectoryOper
+            for d in DirectoryOper().list():
+                if d.download_path and d.download_path not in candidates:
+                    candidates.append(d.download_path)
+        except Exception:
+            pass
+        # 扫描结果中出现过的下载目录父目录
+        for item in (self._scan_results or {}).get("untransferred", []):
+            parent = os.path.dirname(item.get("path", ""))
+            if parent and parent not in candidates:
+                candidates.append(parent)
+        return [{"title": p, "value": p} for p in sorted(set(candidates)) if p]
 
-    @staticmethod
-    def _normalize_path_list(raw: Any) -> List[str]:
+    def _normalize_path_list(self, raw: Any) -> List[str]:
         """把 VCombobox 提交的 {title,value} 字典列表或纯字符串列表归一化为纯路径字符串列表。
 
         兼容旧版换行分隔字符串（exclude_dirs 早期用 VTextarea 存储）。
@@ -275,17 +304,9 @@ class MediaGarbageCleaner(_PluginBase):
                     result.append(item.strip())
             elif isinstance(item, dict):
                 val = item.get("value")
-                if val and isinstance(val, str) and val.strip():
-                    result.append(val.strip())
-        seen = set()
-        out = []
-        for p in result:
-            if p and p not in seen:
-                seen.add(p)
-                out.append(p)
-        return out
-
-    @staticmethod
+                if val and str(val).strip():
+                    result.append(str(val).strip())
+        return result
     def _stat_card(title: str, value: str, icon: str, color: str, subtitle: str) -> dict:
         """对齐 MP 运维助手 的 _status_card 风格。"""
         return {
@@ -599,6 +620,23 @@ class MediaGarbageCleaner(_PluginBase):
                 ))
             page.append(self._section_card("孤儿 strm（源目录已删）", "mdi-cloud-off", "deep-orange", len(orphans), rows, header_actions=cat_sel("s")))
 
+        # 下载目录未整理资源
+        untransferred = results.get("untransferred", [])
+        if untransferred:
+            rows = []
+            for i, item in enumerate(untransferred[:100]):
+                path = item.get("path", "")
+                key = f"u:{i}"
+                display = path if len(path) <= 80 else "…" + path[-77:]
+                size_str = self._format_size(item.get("size", 0))
+                sub = f"目录: {item.get('parent', '')}｜大小: {size_str}"
+                rows.append(self._item_row(
+                    key=key, title=display, subtitle=sub,
+                    is_selected=key in selected, toggle_api=toggle_api,
+                    delete_api=delete_api, delete_params={"type": "untransferred", "path": path},
+                ))
+            page.append(self._section_card("下载目录未整理资源", "mdi-download-off", "cyan", len(untransferred), rows, header_actions=cat_sel("u")))
+
         # 未扫描占位
         if not has_results:
             page.append({
@@ -636,6 +674,7 @@ class MediaGarbageCleaner(_PluginBase):
             "empty_dirs": self._scan_empty_dirs(),
             "failed_transfers": self._scan_failed_transfers(),
             "orphan_streams": self._scan_orphan_streams(),
+            "untransferred": self._scan_untransferred(),
         }
         results["summary"] = {
             "broken_symlinks": len(results["broken_symlinks"]),
@@ -644,8 +683,10 @@ class MediaGarbageCleaner(_PluginBase):
             "empty_dirs": len(results["empty_dirs"]),
             "failed_transfers": len(results["failed_transfers"]),
             "orphan_streams": len(results["orphan_streams"]),
+            "untransferred": len(results["untransferred"]),
             "total": len(results["broken_symlinks"]) + len(results["hardlinks"]) + len(results["duplicates"])
-            + len(results["empty_dirs"]) + len(results["failed_transfers"]) + len(results["orphan_streams"]),
+            + len(results["empty_dirs"]) + len(results["failed_transfers"]) + len(results["orphan_streams"])
+            + len(results["untransferred"]),
         }
         self._scan_results = results
         self.save_data("scan_results", results)
@@ -656,8 +697,9 @@ class MediaGarbageCleaner(_PluginBase):
         return self._scan_results or {
             "broken_symlinks": [], "hardlinks": [], "duplicates": [], "empty_dirs": [], "failed_transfers": [],
             "orphan_streams": [],
+            "untransferred": self._scan_untransferred(),
             "summary": {"broken_symlinks": 0, "hardlinks": 0, "duplicates": 0, "empty_dirs": 0,
-                        "failed_transfers": 0, "orphan_streams": 0, "total": 0},
+                        "failed_transfers": 0, "orphan_streams": 0, "untransferred": 0, "total": 0},
         }
 
     def _scan_broken_symlinks(self) -> List[Dict[str, Any]]:
@@ -854,6 +896,117 @@ class MediaGarbageCleaner(_PluginBase):
             logger.error(f"扫描失败整理记录出错: {e}")
         return failed
 
+    def _scan_untransferred(self) -> List[Dict[str, Any]]:
+        """扫描下载目录中从未被整理过的媒体文件。
+
+        遍历所有配置的下载目录，查找媒体文件（视频/音频），
+        检查是否存在成功的 TransferHistory 记录。
+        没有记录的 = 从未被整理过的文件，可作为清理候选。
+        """
+        if not self._untransfer_scan_enabled:
+            return []
+
+        # 获取所有下载目录
+        download_dirs = set()
+        try:
+            from app.db import ScopedSession
+            from app.db.models.directory import Directory
+
+            db = ScopedSession()
+            try:
+                for d in db.query(Directory).all():
+                    if d.download_path and d.download_path not in download_dirs:
+                        download_dirs.add(d.download_path)
+            finally:
+                db.close()
+        except Exception:
+            pass
+        # fallback: 常见下载目录
+        for fallback in ["/media/downloads/BT下载", "/media/downloads"]:
+            if os.path.isdir(fallback):
+                download_dirs.add(fallback)
+
+        if not download_dirs:
+            return []
+
+        # 收集所有已整理成功的文件路径（src）
+        transferred_paths: set = set()
+        try:
+            from app.db import ScopedSession
+            from app.db.models.transferhistory import TransferHistory
+
+            db = ScopedSession()
+            try:
+                for record in db.query(TransferHistory.src).filter(
+                    TransferHistory.status == "成功"
+                ).limit(50000).all():
+                    if record[0]:
+                        transferred_paths.add(os.path.normpath(record[0]))
+            finally:
+                db.close()
+        except Exception as e:
+            logger.error(f"查询已整理记录出错: {e}")
+
+        # 视频/音频扩展名
+        media_exts = self._video_exts or {".mkv", ".mp4", ".avi", ".ts", ".flv", ".rmvb", ".wmv", ".m4v", ".mp3", ".flac", ".wav", ".aac"}
+        media_exts = media_exts | {".iso", ".bdmv"}
+
+        untransferred: List[Dict[str, Any]] = []
+        for dl_dir in download_dirs:
+            if not os.path.isdir(dl_dir):
+                continue
+            try:
+                for root, dirs, files in os.walk(dl_dir):
+                    # 跳过排除目录
+                    if self._is_excluded(root):
+                        continue
+                    dirs[:] = [d for d in dirs if not self._is_excluded(os.path.join(root, d))]
+                    for name in files:
+                        # 跳过非媒体文件
+                        ext = os.path.splitext(name)[1].lower()
+                        if ext not in media_exts:
+                            continue
+                        # 跳过保护的名称
+                        if self._name_protected(name):
+                            continue
+                        # 跳过排除目录
+                        if self._is_untransfer_excluded(filepath):
+                            continue
+                        filepath = os.path.join(root, name)
+                        # 跳过符号链接
+                        if os.path.islink(filepath):
+                            continue
+                        # 检查是否已整理
+                        norm_path = os.path.normpath(filepath)
+                        if norm_path in transferred_paths:
+                            continue
+                        # 跳过排除目录
+                    if self._is_untransfer_excluded(filepath):
+                        continue
+                    # 获取文件信息
+                        try:
+                            st = os.stat(filepath)
+                            size = st.st_size
+                            mtime = st.st_mtime
+                        except OSError:
+                            continue
+                        # 跳过过小的文件（<1MB，可能是样本/预告）
+                        if size < 1024 * 1024:
+                            continue
+                        untransferred.append({
+                            "path": filepath,
+                            "size": size,
+                            "mtime": mtime,
+                            "parent": os.path.basename(root),
+                            "item_type": "untransferred",
+                        })
+            except Exception as e:
+                logger.error(f"扫描下载目录出错 ({dl_dir}): {e}")
+
+        # 按修改时间排序，最旧的在前（更可能是垃圾）
+        untransferred.sort(key=lambda x: x.get("mtime", 0))
+        return untransferred
+
     def _scan_orphan_streams(self) -> List[Dict[str, Any]]:
         """扫描媒体库中源目录已删除、但整理目录仍残留的 strm 文件。"""
         if not self._orphan_scan_enabled:
@@ -918,6 +1071,30 @@ class MediaGarbageCleaner(_PluginBase):
 
         return orphans
 
+    def _is_untransfer_excluded(self, path: str) -> bool:
+        """检查路径是否在未整理资源排除列表中。
+
+        排除逻辑：
+        1) 路径前缀匹配排除目录
+        2) 文件名或父目录名包含排除关键词（不区分大小写，| 分隔）
+        """
+        # 排除目录
+        norm = os.path.normpath(path)
+        for exclude in self._untransfer_exclude_dirs:
+            e = os.path.normpath(exclude)
+            if norm.startswith(e + os.sep) or norm == e:
+                return True
+        # 排除关键词
+        if self._untransfer_exclude_keywords:
+            name = os.path.basename(path)
+            parent = os.path.basename(os.path.dirname(path))
+            combined = (name + "|" + parent).lower()
+            for kw in self._untransfer_exclude_keywords.split("|"):
+                kw = kw.strip().lower()
+                if kw and kw in combined:
+                    return True
+        return False
+
     def _get_library_dirs(self) -> List[str]:
         """获取所有媒体库目录。"""
         dirs = []
@@ -966,14 +1143,27 @@ class MediaGarbageCleaner(_PluginBase):
         try:
             if item_type == "broken_symlink" and os.path.islink(path):
                 os.remove(path)
+                # 联动清理：同目录刮削残留 → 数据库历史记录（受 cascade_cleanup 开关控制）
+                th_count = 0
+                dh_count = 0
+                if self._cascade_cleanup:
+                    th_count = self._cleanup_transfer_history(path)
+                    dh_count = self._cleanup_download_history(path)
+                    self._cleanup_scrape_orphans(path)
                 parent = os.path.dirname(path)
                 if parent and os.path.isdir(parent) and not os.listdir(parent):
                     os.rmdir(parent)
-                # 从缓存中移除
                 self._scan_results["broken_symlinks"] = [x for x in self._scan_results.get("broken_symlinks", []) if x.get("path") != path]
                 self._update_summary()
                 self.save_data("scan_results", self._scan_results)
+                extras = []
+                if th_count:
+                    extras.append(f"整理记录 {th_count} 条")
+                if dh_count:
+                    extras.append(f"下载记录 {dh_count} 条")
                 msg = f"已删除: {os.path.basename(path)}"
+                if extras:
+                    msg += "，联动清理 " + "、".join(extras)
                 if not silent:
                     self._notify_result("删除完成", msg)
                 return {"success": True, "message": msg}
@@ -1016,6 +1206,12 @@ class MediaGarbageCleaner(_PluginBase):
                 media_file_exts = {".strm", ".nfo", ".jpg", ".jpeg", ".png", ".gif", ".webp",
                                    ".tbn", ".bn", ".pdf"}
                 parent = os.path.dirname(path)
+                # 联动清理：数据库历史记录（受 cascade_cleanup 开关控制）
+                th_count = 0
+                dh_count = 0
+                if self._cascade_cleanup:
+                    th_count = self._cleanup_transfer_history(path)
+                    dh_count = self._cleanup_download_history(path)
                 if parent:
                     try:
                         for entry in os.listdir(parent):
@@ -1034,10 +1230,18 @@ class MediaGarbageCleaner(_PluginBase):
                             cur = os.path.dirname(cur)
                         else:
                             break
+                # 从缓存中移除
                 self._scan_results["orphan_streams"] = [x for x in self._scan_results.get("orphan_streams", []) if x.get("path") != path]
                 self._update_summary()
                 self.save_data("scan_results", self._scan_results)
+                extras = []
+                if th_count:
+                    extras.append(f"整理记录 {th_count} 条")
+                if dh_count:
+                    extras.append(f"下载记录 {dh_count} 条")
                 msg = f"已删除孤儿 strm: {os.path.basename(path)}"
+                if extras:
+                    msg += "，联动清理 " + "、".join(extras)
                 if not silent:
                     self._notify_result("删除完成", msg)
                 return {"success": True, "message": msg}
@@ -1060,6 +1264,49 @@ class MediaGarbageCleaner(_PluginBase):
                         return {"success": True, "message": msg}
                 finally:
                     db.close()
+
+            elif item_type == "untransferred" and os.path.isfile(path) and not os.path.islink(path):
+                # 下载目录未整理资源：删除文件，并向上收空目录
+                try:
+                    size = os.path.getsize(path)
+                except OSError:
+                    size = 0
+                os.remove(path)
+                # 联动清理
+                th_count = 0
+                dh_count = 0
+                if self._cascade_cleanup:
+                    th_count = self._cleanup_transfer_history(path)
+                    dh_count = self._cleanup_download_history(path)
+                # 向上收空目录（仅限下载目录内）
+                parent = os.path.dirname(path)
+                if parent:
+                    lib_dirs = self._get_library_dirs()
+                    cur = parent
+                    while cur and cur != "/" and cur not in lib_dirs:
+                        if os.path.isdir(cur) and not os.listdir(cur):
+                            try:
+                                os.rmdir(cur)
+                            except OSError:
+                                break
+                            cur = os.path.dirname(cur)
+                        else:
+                            break
+                self._scan_results["untransferred"] = [x for x in self._scan_results.get("untransferred", []) if x.get("path") != path]
+                self._update_summary()
+                self.save_data("scan_results", self._scan_results)
+                size_str = self._format_size(size) if size else ""
+                extras = []
+                if th_count:
+                    extras.append(f"整理记录 {th_count} 条")
+                if dh_count:
+                    extras.append(f"下载记录 {dh_count} 条")
+                msg = f"已删除未整理文件: {os.path.basename(path)}" + (f"（{size_str}）" if size_str else "")
+                if extras:
+                    msg += "，联动清理 " + "、".join(extras)
+                if not silent:
+                    self._notify_result("删除完成", msg)
+                return {"success": True, "message": msg}
 
             msg = "无法删除（项目可能已不存在或参数不匹配）"
             if not silent:
@@ -1092,6 +1339,8 @@ class MediaGarbageCleaner(_PluginBase):
             items.append({"type": "failed_transfer", "id": item["id"]})
         for item in results.get("orphan_streams", []):
             items.append({"type": "orphan_stream", "path": item["path"]})
+        for item in results.get("untransferred", []):
+            items.append({"type": "untransferred", "path": item["path"]})
 
         if not items:
             return {"success": True, "message": "没有需要删除的项目"}
@@ -1119,9 +1368,11 @@ class MediaGarbageCleaner(_PluginBase):
             "empty_dirs": len(results.get("empty_dirs", [])),
             "failed_transfers": len(results.get("failed_transfers", [])),
             "orphan_streams": len(results.get("orphan_streams", [])),
+            "untransferred": len(results.get("untransferred", [])),
             "total": len(results.get("broken_symlinks", [])) + len(results.get("hardlinks", []))
             + len(results.get("duplicates", [])) + len(results.get("empty_dirs", []))
-            + len(results.get("failed_transfers", [])) + len(results.get("orphan_streams", [])),
+            + len(results.get("failed_transfers", [])) + len(results.get("orphan_streams", []))
+            + len(results.get("untransferred", [])),
         }
 
     # ==================== 交互端点（选中 / 批量 / 刷新） ====================
@@ -1150,7 +1401,7 @@ class MediaGarbageCleaner(_PluginBase):
         页面每类最多展示前 100 条，key 形如 b:<i> / h:<i> / e:<i> / f:<i>。
         category 为 None 时返回所有分类。category 取值：b/h/e/f。
         """
-        mapping = (("broken_symlinks", "b"), ("hardlinks", "h"), ("duplicates", "d"), ("empty_dirs", "e"), ("orphan_streams", "s"), ("failed_transfers", "f"))
+        mapping = (("broken_symlinks", "b"), ("hardlinks", "h"), ("duplicates", "d"), ("empty_dirs", "e"), ("orphan_streams", "s"), ("failed_transfers", "f"), ("untransferred", "u"))
         if category:
             mapping = [m for m in mapping if m[1] == category]
         keys: List[str] = []
@@ -1165,7 +1416,7 @@ class MediaGarbageCleaner(_PluginBase):
         category: b(断链软链) / h(硬链) / e(空目录) / f(失败记录)
         mode: all(全选) / invert(反选)
         """
-        if category not in ("b", "h", "e", "f", "s"):
+        if category not in ("b", "h", "e", "f", "s", "u"):
             return {"success": False, "message": "无效的分类"}
         keys = self._visible_keys(category)
         if mode == "invert":
@@ -1216,6 +1467,13 @@ class MediaGarbageCleaner(_PluginBase):
                     res = self._delete_item({"type": "orphan_stream", "path": item.get("path", "")})
                 else:
                     res = {"success": False, "message": "找不到对应项"}
+            elif kind == "u":
+                idx = self._key_index(key)
+                item = self._item_by_index("untransferred", idx)
+                if item:
+                    res = self._delete_item({"type": "untransferred", "path": item.get("path", "")})
+                else:
+                    res = {"success": False, "message": "找不到对应项"}
             else:
                 res = {"success": False, "message": "未知类型"}
             if res.get("success"):
@@ -1238,6 +1496,18 @@ class MediaGarbageCleaner(_PluginBase):
     # ==================== 选中项辅助 ====================
 
     @staticmethod
+    def _format_size(size_bytes: int) -> str:
+        """格式化文件大小为人类可读字符串。"""
+        if size_bytes < 1024:
+            return f"{size_bytes} B"
+        elif size_bytes < 1024 * 1024:
+            return f"{size_bytes / 1024:.1f} KB"
+        elif size_bytes < 1024 * 1024 * 1024:
+            return f"{size_bytes / (1024 * 1024):.1f} MB"
+        else:
+            return f"{size_bytes / (1024 * 1024 * 1024):.2f} GB"
+
+    @staticmethod
     def _key_index(key: str) -> int:
         """从 key（如 b:3）提取序号。"""
         try:
@@ -1251,6 +1521,99 @@ class MediaGarbageCleaner(_PluginBase):
         if 0 <= idx < len(items):
             return items[idx]
         return None
+
+    # ==================== 通知 ====================
+
+    def _cleanup_transfer_history(self, file_path: str) -> int:
+        """删除文件后联动清理匹配该路径的 TransferHistory 记录。
+
+        删除媒体库文件后，对应的 TransferHistory 条目已无实际意义，
+        留在数据库会导致系统记住旧记录、干扰后续重新整理。
+        返回成功删除的记录数。
+        """
+        count = 0
+        if not file_path:
+            return count
+        try:
+            from app.db import ScopedSession
+            from app.db.models.transferhistory import TransferHistory
+
+            norm = os.path.normpath(file_path)
+            db = ScopedSession()
+            try:
+                # 匹配 src 或 dest 路径（标准化后比较）
+                for record in db.query(TransferHistory).filter(
+                    (TransferHistory.src == norm) | (TransferHistory.dest == norm)
+                ).all():
+                    db.delete(record)
+                    count += 1
+                if count:
+                    db.commit()
+            finally:
+                db.close()
+        except Exception as e:
+            logger.debug(f"联动清理 TransferHistory 失败（忽略）: {e}")
+        return count
+
+    def _cleanup_download_history(self, file_path: str) -> int:
+        """删除文件后联动清理匹配该路径的 DownloadHistory 记录。
+
+        返回成功删除的记录数。
+        """
+        count = 0
+        if not file_path:
+            return count
+        try:
+            from app.db import ScopedSession
+            from app.db.models.downloadhistory import DownloadHistory
+
+            norm = os.path.normpath(file_path)
+            db = ScopedSession()
+            try:
+                for record in db.query(DownloadHistory).filter(
+                    DownloadHistory.path == norm
+                ).all():
+                    db.delete(record)
+                    count += 1
+                if count:
+                    db.commit()
+            finally:
+                db.close()
+        except Exception as e:
+            logger.debug(f"联动清理 DownloadHistory 失败（忽略）: {e}")
+        return count
+
+    def _cleanup_scrape_orphans(self, file_path: str) -> None:
+        """删除媒体文件后，清理同目录下的刮削残留（nfo/jpg等），然后向上收空目录。
+
+        与孤儿 strm 的清理逻辑一致：删除 strm 后自动清除同目录附属文件，
+        然后逐级向上删除空目录直到媒体库根。
+        """
+        parent = os.path.dirname(file_path)
+        if not parent or not os.path.isdir(parent):
+            return
+        scrape_exts = {".nfo", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".tbn", ".bn", ".pdf"}
+        try:
+            for entry in os.listdir(parent):
+                fp = os.path.join(parent, entry)
+                if os.path.isfile(fp) or os.path.islink(fp):
+                    ext = os.path.splitext(entry)[1].lower()
+                    if ext in scrape_exts:
+                        os.remove(fp)
+        except Exception:
+            pass
+        # 向上收空目录
+        lib_dirs = [d for d in self._get_library_dirs()]
+        cur = parent
+        while cur and cur != "/" and cur not in lib_dirs:
+            if os.path.isdir(cur) and not os.listdir(cur):
+                try:
+                    os.rmdir(cur)
+                except OSError:
+                    break
+                cur = os.path.dirname(cur)
+            else:
+                break
 
     # ==================== 通知 ====================
 
