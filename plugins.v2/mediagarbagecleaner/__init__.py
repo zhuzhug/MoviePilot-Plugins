@@ -26,7 +26,7 @@ class MediaGarbageCleaner(_PluginBase):
     plugin_name = "资源清理"
     plugin_desc = "扫描媒体库中的断链软链接、硬链接、重复文件、空目录、孤儿 strm、未整理资源与失败记录；支持按地址与名称保护、两级确认防误删、手动或批量清理。"
     plugin_icon = "mdi-broom"
-    plugin_version = "1.8.1"
+    plugin_version = "1.8.2"
     plugin_label = "媒体整理"
     plugin_label = "媒体整理"
     plugin_author = "zhuzhug"
