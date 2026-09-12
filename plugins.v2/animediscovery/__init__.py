@@ -43,7 +43,7 @@ class AnimeDiscovery(_PluginBase):
     plugin_name = "当季新番"
     plugin_desc = "发现当季新番，按日期分组，一键订阅追番。"
     plugin_icon = "mdi-play-circle"
-    plugin_version = "2.15.1"
+    plugin_version = "2.16.0"
     plugin_label = "订阅"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "anime_discovery_"
@@ -138,6 +138,7 @@ class AnimeDiscovery(_PluginBase):
                                 {"title": "Bangumi", "value": "bangumi"},
                                 {"title": "蜜柑", "value": "mikan"},
                                 {"title": "番组百科", "value": "anibk"},
+                                {"title": "番组百科·每日更新", "value": "anibk_daily"},
                             ],
                         }}
                     ]},
@@ -529,6 +530,8 @@ class AnimeDiscovery(_PluginBase):
             anime_list = self._fetch_bangumi()
         elif self._data_source == "anibk":
             anime_list = self._fetch_anibk()
+        elif self._data_source == "anibk_daily":
+            anime_list = self._fetch_anibk_daily()
         else:
             anime_list = self._fetch_tmdb()
 
@@ -750,6 +753,70 @@ class AnimeDiscovery(_PluginBase):
             logger.info(f"番组百科抓取完成: {len(anime_list)} 部当季新番")
         except Exception as e:
             logger.error(f"番组百科请求失败: {e}")
+        return anime_list
+
+    def _fetch_anibk_daily(self) -> List[Dict[str, Any]]:
+        """从番组百科（anibk.com）抓取「今日更新」列表。
+
+        取首页「每周放送表」中与今天星期几对应的分组，返回今天更新/放送的番剧，
+        附带放送时间、话数，以及站点标记的 new 标识。
+        """
+        anime_list: List[Dict[str, Any]] = []
+        try:
+            ru = RequestUtils(proxies=settings.PROXY)
+            resp = ru.get("https://www.anibk.com/", timeout=30)
+            if not resp:
+                return []
+
+            today = datetime.now()
+            weekday = today.isoweekday()
+            date_str = today.strftime("%Y-%m-%d")
+            sl = self._get_season_label()
+            year = str(today.year)
+
+            block_m = re.search(r'<ul id="wk-bk-%d"[^>]*>(.*?)</ul>' % weekday, resp, re.S)
+            if not block_m:
+                logger.warning(f"番组百科: 未找到今天（周{weekday}）的放送分组")
+                return []
+
+            block = block_m.group(1)
+            items = re.findall(r'<li>\s*<div class="char-bk-sub">.*?</li>', block, re.S)
+            for it in items:
+                title_m = re.search(r'<a title="([^"]+)" href="/bk/(\d+)"', it)
+                if not title_m:
+                    continue
+                title = html.unescape(title_m.group(1)).strip()
+                anibk_id = title_m.group(2)
+                time_m = re.search(r'<span class="v fs tm">([^<]+)</span>', it)
+                ep_m = re.search(r'<span class="k">(第[^<]*话[^<]*)</span>', it)
+                air_time = time_m.group(1).strip() if time_m else ""
+                episode = ep_m.group(1).strip() if ep_m else ""
+                overview = "番组百科 · 今日更新"
+                if air_time:
+                    overview += " " + air_time
+                if episode:
+                    overview += " " + episode
+                anime_list.append({
+                    "title": title,
+                    "year": year,
+                    "air_date": date_str,
+                    "season": sl,
+                    "rating": 0,
+                    "poster": "",
+                    "overview": overview,
+                    "tmdb_id": "",
+                    "bangumi_id": "",
+                    "anibk_link": f"https://www.anibk.com/bk/{anibk_id}",
+                    "anibk_id": anibk_id,
+                    "anibk_time": air_time,
+                    "anibk_episode": episode,
+                    "anibk_new": "new!" in it,
+                    "media_type": "tv",
+                    "subscribed": False,
+                })
+            logger.info(f"番组百科今日更新抓取完成: {len(anime_list)} 部（周{weekday}）")
+        except Exception as e:
+            logger.error(f"番组百科今日更新请求失败: {e}")
         return anime_list
 
     # ==================== AI 增强 ====================
