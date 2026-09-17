@@ -1,3 +1,4 @@
+import re
 from collections import defaultdict
 from datetime import datetime
 from threading import Lock
@@ -15,10 +16,28 @@ from app.db.downloadhistory_oper import DownloadHistoryOper
 from app.db.transferhistory_oper import TransferHistoryOper
 from app.helper.downloader import DownloaderHelper
 from app.log import logger
+from app.modules.themoviedb.tmdbv3api import TMDb
 from app.plugins import _PluginBase
 from app.schemas import NotificationType, Response
 from app.schemas.types import EventType
 from app.plugins.crossseedview.media_title_extractor import extract_media_title, normalize_title
+
+
+# ==================== 种子名标题工具（翻译匹配用） ====================
+
+def _norm_title(s: str) -> str:
+    """标题归一化：小写并去掉非中英数字字符，用于跨语言模糊比对。"""
+    return re.sub(r"[^a-z0-9\u4e00-\u9fff]", "", str(s or "").lower())
+
+
+def _is_cn(s: str) -> bool:
+    """是否包含中文字符。"""
+    return bool(re.search(r"[\u4e00-\u9fff]", s or ""))
+
+
+def _is_ascii(s: str) -> bool:
+    """是否只含 ASCII 字符（用于判断提取出的标题是英文标题）。"""
+    return bool(s or "") and all(ord(c) < 128 for c in s)
 
 
 class SaveFiltersParams(BaseModel):
@@ -83,7 +102,7 @@ class CrossSeedView(_PluginBase):
     plugin_name = "辅种查看"
     plugin_desc = "扫描所有下载器种子，按“种子名+大小”识别辅种关系，用可折叠卡片展示辅种数量、保存路径与明细，支持交互筛选与可选删除。"
     plugin_icon = "seed.png"
-    plugin_version = "1.3.6"
+    plugin_version = "1.3.7"
     plugin_label = "下载器"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "crossseedview_"
@@ -132,8 +151,10 @@ class CrossSeedView(_PluginBase):
     _current_page: int = 1
     # 每页分组数（详情页分页大小）
     PAGE_SIZE: int = 50
-    # 翻译缓存：{原始名: 中文名}，非持久化
+    # 翻译缓存：{原始名: 中文名}，插件数据持久化（跨重启保留）
     _translation_cache: Dict[str, str] = {}
+    # 本轮翻译各来源命中数（仅信息提示用）
+    _last_translate_stats: Dict[str, int] = {}
     # endregion
 
     def init_plugin(self, config: dict = None) -> None:
@@ -219,6 +240,9 @@ class CrossSeedView(_PluginBase):
                 )
         except Exception as err:  # noqa: BLE001
             logger.debug(f"[CrossSeedView] 加载持久化缓存失败（忽略）：{err}")
+
+        # 加载持久化翻译缓存（中文名优先来自 TMDB 官方标题）
+        self._load_translation_cache()
 
         if self._refresh_on_init:
             try:
@@ -1148,27 +1172,292 @@ class CrossSeedView(_PluginBase):
     # ==================== 翻译功能 ====================
 
     def translate_names(self, params: TranslateParams) -> dict:
-        """批量翻译种子名为中文，结果缓存在内存中。"""
-        if not params.names:
-            return {"success": True, "translations": {}}
+        """批量翻译种子名为中文：优先匹配 TMDB 官方中文名，剩余部分再走大模型机翻。
 
-        # 过滤已缓存的
+        结果按来源拆分统计并持久化到插件数据，跨重启保留。
+        """
+        if not params.names:
+            return {"success": True, "translations": {}, "sources": {}}
+
+        # 过滤已缓存的（含历史 TMDB 结果与大模型结果）
         to_translate = []
         result = {}
         for name in params.names:
+            name = str(name or "").strip()
+            if not name:
+                continue
             if name in self._translation_cache:
                 result[name] = self._translation_cache[name]
             else:
                 to_translate.append(name)
 
-        if not to_translate:
-            return {"success": True, "translations": result}
+        stats = {"tmdb": 0, "llm": 0, "miss": 0}
 
-        # 调用 LLM 翻译
+        # 第一步：用 TMDB 官方中文名匹配（多语言接口 + 别名兜底）
+        if to_translate:
+            try:
+                for name in self._match_tmdb_names(to_translate):
+                    stats["tmdb"] += 1
+            except Exception as err:  # noqa: BLE001
+                logger.warning(f"[CrossSeedView] TMDB 匹配中文标题失败（回退大模型）：{err}")
+
+        # 第二步：剩余部分交给大模型机翻
+        remaining = [n for n in to_translate if n not in self._translation_cache]
+        if remaining:
+            stats["llm"] = len(self._llm_translate(remaining))
+            stats["miss"] = len(remaining) - stats["llm"]
+        else:
+            stats["miss"] = 0
+
+        for name in to_translate:
+            if name in self._translation_cache:
+                result[name] = self._translation_cache[name]
+
+        self._last_translate_stats = stats
+        self._save_translation_cache()
+
+        logger.info(
+            f"[CrossSeedView] 翻译完成：共 {len(result)}/{len(params.names)} 条"
+            f"（TMDB 匹配 {stats['tmdb']}，大模型 {stats['llm']}，未命中 {stats['miss']}）"
+        )
+        return {"success": True, "translations": result, "sources": stats}
+
+    def _load_translation_cache(self) -> None:
+        """从插件数据加载持久化翻译缓存。"""
         try:
-            from app.utils.http import RequestUtils
+            saved = self.get_data("translations")
+            if isinstance(saved, dict):
+                loaded = {
+                    str(k): str(v)
+                    for k, v in saved.items()
+                    if k and v
+                }
+                self._translation_cache = loaded
+                if loaded:
+                    logger.info(f"[CrossSeedView] 已加载翻译缓存 {len(loaded)} 条")
+        except Exception as err:  # noqa: BLE001
+            logger.debug(f"[CrossSeedView] 加载翻译缓存失败（忽略）：{err}")
 
-            batch_text = "\n".join([f"{i+1}. {n}" for i, n in enumerate(to_translate)])
+    def _save_translation_cache(self) -> None:
+        """把翻译缓存持久化到插件数据。"""
+        try:
+            # 限制总量，避免数据表膨胀（保留最新写入的前 500 条）
+            items = list(self._translation_cache.items())
+            if len(items) > 500:
+                items = items[-500:]
+                self._translation_cache = dict(items)
+            self.save_data("translations", self._translation_cache)
+        except Exception as err:  # noqa: BLE001
+            logger.debug(f"[CrossSeedView] 保存翻译缓存失败（忽略）：{err}")
+
+    # 从种子名中抽取年份，仅当出现在名称后半段且是合理年份时才采信
+    _YEAR_SEARCH_PATTERN = re.compile(r"(?<!\d)(19|20)\d{2}(?!\d)")
+
+    @classmethod
+    def _extract_year(cls, name: str) -> Optional[int]:
+        if not name:
+            return None
+        # 年份一般出现在标题之后，取最后一次的匹配，降低"19 世纪""第 1 集"等误判概率
+        matches = list(cls._YEAR_SEARCH_PATTERN.finditer(name))
+        if not matches:
+            return None
+        m = matches[-1]
+        if m.start() < len(name) * 0.5:
+            return None
+        return int(m.group(0))
+
+    def _match_tmdb_names(self, names: List[str]) -> List[str]:
+        """用 TMDB 匹配官方中文名。
+
+        先用 zh-CN 语言搜索，再读取多语言详情里的中文标题与别名；
+        返回成功匹配的名称列表，未命中的由调用方回退到大模型机翻。
+        """
+        from app.modules.themoviedb.tmdbv3api import Search
+
+        search = Search(language="zh-CN")
+
+        matched: List[str] = []
+        for raw_name in names:
+            title = extract_media_title(raw_name)
+            if not title:
+                continue
+            norm_query = _norm_title(title)
+            if not norm_query:
+                continue
+
+            best: Optional[Tuple[str, int, str, float]] = None
+            best_score = 0.0
+
+            def _collect(items: List[dict], mt: str) -> None:
+                nonlocal best, best_score
+                for item in items or []:
+                    if not isinstance(item, dict) or not item.get("id"):
+                        continue
+                    cand = self._score_tmdb_item(item, mt, norm_query)
+                    if cand and cand[3] > best_score:
+                        best, best_score = cand, cand[3]
+
+            for getter in ("multi", "tv_shows", "movies"):
+                try:
+                    if getter == "multi":
+                        _collect(list(search.multi(term=title) or []), "")
+                    elif getter == "tv_shows":
+                        _collect(list(search.tv_shows(term=title) or []), "tv")
+                    else:
+                        _collect(list(search.movies(term=title) or []), "movie")
+                except Exception as err:  # noqa: BLE001
+                    logger.debug(f"[CrossSeedView] TMDB {getter} 搜索失败：{err}")
+                if best is not None and best_score >= 0.85:
+                    break
+
+            if best is None or best_score < 0.6:
+                continue
+
+            media_type, media_id, source_name = best[0], best[1], best[2]
+            name_cn = ""
+            alt_cn: List[str] = []
+            try:
+                detail = self._get_tmdb_detail(media_type, media_id)
+                if detail:
+                    # translations 为 {"translations": [{iso_639_1, data:{name}}]}
+                    for entry in self._unwrap_list(detail.get("translations"), "translations"):
+                        if not isinstance(entry, dict) or entry.get("iso_639_1") != "zh":
+                            continue
+                        candidate = str((entry.get("data") or {}).get("name") or "").strip()
+                        if not candidate:
+                            continue
+                        if not name_cn:
+                            name_cn = candidate
+                        elif candidate not in alt_cn:
+                            alt_cn.append(candidate)
+                    # alternative_titles 为 {"results": [{iso_639_1, title}]}
+                    for entry in self._unwrap_list(detail.get("alternative_titles"), "results"):
+                        if not isinstance(entry, dict) or entry.get("iso_639_1") != "zh":
+                            continue
+                        candidate = str(entry.get("title") or "").strip()
+                        if candidate and candidate != name_cn and candidate not in alt_cn:
+                            alt_cn.append(candidate)
+            except Exception as err:  # noqa: BLE001
+                logger.debug(f"[CrossSeedView] 读取 TMDB 多语言标题失败（{media_id}）：{err}")
+
+            # 多版本中文名（如"死神"与"境·界"）时，优先选与种子名里已有中文片段一致的
+            if alt_cn:
+                for a in alt_cn:
+                    na = _norm_title(a)
+                    if na and len(na) >= 2 and na in _norm_title(raw_name):
+                        name_cn = a
+                        break
+
+            if not name_cn:
+                continue
+
+            self._translation_cache[raw_name] = name_cn
+            matched.append(raw_name)
+            logger.debug(
+                f"[CrossSeedView] TMDB 匹配：{source_name} -> {name_cn}（{best_score:.2f}）"
+            )
+        return matched
+
+
+    @staticmethod
+    def _score_tmdb_item(item: dict, media_type: str, norm_query: str) -> Optional[Tuple[str, int, str, float]]:
+        """给候选条目打分。
+
+        返回 (媒体类型, 媒体ID, 标题, 得分)；条目不可用返回 None。
+        搜索接口在 zh-CN 语言下返回的是中文名，所以中文标题需要与种子名互含，
+        英文标题走编辑距离相似度，避免把不同作品误判成同一部。
+        """
+        media_id = item.get("id")
+        name = str(item.get("name") or item.get("title") or "")
+        if not media_id or not name:
+            return None
+        norm_name = _norm_title(name)
+        if not norm_name:
+            return None
+
+        if _is_cn(norm_query):
+            # 中文查询：要求查询词与中文标题互含，短于 2 字的标题不可靠
+            if len(norm_query) < 2 or len(norm_name) < 2:
+                return None
+            score = 0.9 if (norm_name in norm_query or norm_query in norm_name) else 0.0
+        elif _is_ascii(norm_name) and not _is_cn(norm_query):
+            score = CrossSeedView._title_similarity(norm_query, norm_name)
+        else:
+            # 中英混合标题（如"BLEACH 千年血战篇"）：按词段匹配，命中占比越高得分越高
+            tokens = [t for t in re.split(r"[^a-z0-9]+", norm_query) if len(t) >= 2]
+            if not tokens:
+                return None
+            hit = sum(1 for t in tokens if t in norm_name)
+            score = 0.5 + 0.45 * (hit / len(tokens))
+
+        return (str(media_type) or "tv", int(media_id), name, score)
+
+    def _get_tmdb_detail(self, media_type: str, media_id: int) -> Optional[dict]:
+        """读取 TMDB 多语言详情（translations + alternative_titles）。"""
+        from app.modules.themoviedb.tmdbv3api import TV, Movie
+
+        append = "translations,alternative_titles"
+        if media_type == "movie":
+            return Movie(language="all").details(media_id, append_to_response=append)
+        return TV(language="all").details(media_id, append_to_response=append)
+
+    @staticmethod
+    def _unwrap_list(payload: Any, key: str) -> List[Any]:
+        """兼容两种返回形态：直接是列表，或包在 {"key": [...]} 里的字典。"""
+        if isinstance(payload, list):
+            return payload
+        if isinstance(payload, dict):
+            inner = payload.get(key)
+            if isinstance(inner, list):
+                return inner
+            if isinstance(inner, dict):
+                return list(inner.values())
+        return []
+
+    @staticmethod
+    def _title_similarity(a: str, b: str) -> float:
+        """标题相似度：精确 1.0，前后缀包含 0.85，编辑距离归一 0.3-0.99。"""
+        if not a or not b:
+            return 0.0
+        if a == b:
+            return 1.0
+        if a.startswith(b) or b.startswith(a) or a.endswith(b) or b.endswith(a):
+            return 0.85
+        shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
+        if len(shorter) >= 4 and shorter in longer:
+            return 0.85
+        dist = CrossSeedView._levenshtein(a, b)
+        if dist == 0:
+            return 1.0
+        ratio = 1 - dist / max(len(a), len(b))
+        # 短标题要求更严格，避免 "One Piece" 类误命中
+        if len(a) < 6 or len(b) < 6:
+            return ratio if ratio >= 0.7 else 0.0
+        return ratio
+
+    @staticmethod
+    def _levenshtein(a: str, b: str) -> int:
+        if a == b:
+            return 0
+        if len(a) < len(b):
+            a, b = b, a
+        prev = list(range(len(b) + 1))
+        for i, ca in enumerate(a, 1):
+            cur = [i]
+            for j, cb in enumerate(b, 1):
+                cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+            prev = cur
+        return prev[-1]
+
+    def _llm_translate(self, names: List[str]) -> List[str]:
+        """调用大模型机翻，结果写入缓存，返回成功翻译的名称列表。"""
+        if not names:
+            return []
+        from app.utils.http import RequestUtils
+
+        translated: List[str] = []
+        try:
+            batch_text = "\n".join([f"{i + 1}. {n}" for i, n in enumerate(names)])
             prompt = (
                 f"将以下英文/日文影视种子名翻译成简洁的中文名，每行一个，只输出中文译名，不要编号和解释。\n\n{batch_text}"
             )
@@ -1197,22 +1486,16 @@ class CrossSeedView(_PluginBase):
             if resp and hasattr(resp, "json"):
                 data = resp.json()
                 content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-                # 解析结果
                 lines = [l.strip() for l in content.strip().split("\n") if l.strip()]
                 for i, line in enumerate(lines):
-                    if i < len(to_translate):
-                        # 去掉可能的编号前缀
-                        translated = line.lstrip("0123456789.、. ").strip()
-                        if translated:
-                            self._translation_cache[to_translate[i]] = translated
-                            result[to_translate[i]] = translated
-                logger.info(f"[CrossSeedView] 翻译完成 {len(result)}/{len(params.names)} 条")
-            else:
-                logger.warning("[CrossSeedView] 翻译 API 无响应")
-        except Exception as err:
+                    if i < len(names):
+                        translated_line = line.lstrip("0123456789.、. ").strip()
+                        if translated_line:
+                            self._translation_cache[names[i]] = translated_line
+                            translated.append(names[i])
+        except Exception as err:  # noqa: BLE001
             logger.error(f"[CrossSeedView] 翻译失败: {err}")
-
-        return {"success": True, "translations": result}
+        return translated
 
 
     def get_service(self) -> List[Dict[str, Any]]:
