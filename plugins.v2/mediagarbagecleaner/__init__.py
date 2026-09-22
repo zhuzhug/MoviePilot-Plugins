@@ -33,9 +33,9 @@ class MediaGarbageCleaner(_PluginBase):
     """资源清理插件（原名：媒体垃圾扫描）。"""
 
     plugin_name = "资源清理"
-    plugin_desc = "扫描媒体库中的断链软链接、硬链接、重复文件、空目录、孤儿 strm、未整理资源与失败记录；支持按地址与名称保护、两级确认防误删、手动或批量清理。"
+    plugin_desc = "扫描媒体库断链/硬链/重复/空目录/孤儿 strm/未整理/失败记录，并给出下载目录与媒体库的一一对应摘要（库内实体文件、下载库冗余副本、零字节文件、孤儿媒体目录）；支持按地址与名称保护、单次确认清理、手动或批量清理。"
     plugin_icon = "mdi-broom"
-    plugin_version = "1.9.3"
+    plugin_version = "1.10.0"
     plugin_label = "媒体整理"
     plugin_label = "媒体整理"
     plugin_author = "zhuzhug"
@@ -55,7 +55,12 @@ class MediaGarbageCleaner(_PluginBase):
     _untransfer_scan_enabled: bool = False  # 下载目录未整理资源扫描
     _untransfer_exclude_dirs: List[str] = []  # 未整理资源排除目录
     _untransfer_exclude_keywords: str = ""  # 未整理资源排除关键词（文件名/父目录名包含则跳过）
+    _scan_library_entity: bool = False  # 媒体库实体文件扫描（非软链、直接占库空间的真文件）
+    _scan_download_dup: bool = False  # 下载目录冗余扫描（媒体库已有实体副本的下载源，删源不会丢内容）
+    _scan_zero_byte: bool = False  # 零字节文件扫描（空文件，下载中断或未完成的残留）
+    _scan_orphan_media_dir: bool = False  # 孤儿媒体目录扫描（媒体库里只有刮削元数据、无任何视频的目录）
     _scan_results: Dict[str, Any] = {}
+    _media_files_cache: Optional[Tuple[List[str], List[str], List[str]]] = None  # 媒体文件遍历缓存
     _selected: Dict[str, str] = {}  # 已选中的项目 key -> 标识符
     _delete_item_confirmed: bool = False  # 单条删除确认令牌（一次性）
 
@@ -71,6 +76,10 @@ class MediaGarbageCleaner(_PluginBase):
         self._untransfer_scan_enabled = False
         self._untransfer_exclude_dirs = []
         self._untransfer_exclude_keywords = ""
+        self._scan_library_entity = False
+        self._scan_download_dup = False
+        self._scan_zero_byte = False
+        self._scan_orphan_media_dir = False
         self._reserved_keywords = []
         self._delete_mode = _DELETE_MODE_DELETE
         self._orphan_scan_enabled = False
@@ -82,6 +91,11 @@ class MediaGarbageCleaner(_PluginBase):
         self._untransfer_scan_enabled = bool(config.get("untransfer_scan_enabled", False))
         self._untransfer_exclude_dirs = self._normalize_path_list(config.get("untransfer_exclude_dirs") or [])
         self._untransfer_exclude_keywords = str(config.get("untransfer_exclude_keywords") or "")
+        # 一一对应类扫描：这些分类是"信息+可删项"，用于判断下载目录与媒体库是否严格对应
+        self._scan_library_entity = bool(config.get("scan_library_entity", False))
+        self._scan_download_dup = bool(config.get("scan_download_dup", False))
+        self._scan_zero_byte = bool(config.get("scan_zero_byte", False))
+        self._scan_orphan_media_dir = bool(config.get("scan_orphan_media_dir", False))
         # 路径保留关键词：路径任一层命中即永久豁免（扫描与删除都不再触碰）
         rk_raw = config.get("reserved_keywords") or ""
         if isinstance(rk_raw, str):
@@ -140,16 +154,16 @@ class MediaGarbageCleaner(_PluginBase):
         return [
             {"path": "/scan", "endpoint": self._scan_all, "methods": ["GET"], "summary": "执行全量扫描", "auth": "bear"},
             {"path": "/results", "endpoint": self._get_results, "methods": ["GET"], "summary": "获取扫描结果", "auth": "bear"},
-            {"path": "/delete", "endpoint": self._delete_item, "methods": ["POST"], "summary": "删除单个垃圾项", "auth": "bear"},
+            {"path": "/delete", "endpoint": self._delete_item, "methods": ["POST", "GET"], "summary": "删除单个垃圾项", "auth": "bear"},
             {"path": "/delete_all", "endpoint": self._delete_all, "methods": ["POST"], "summary": "删除所有垃圾项", "auth": "bear"},
             {"path": "/toggle_select", "endpoint": self._toggle_select, "methods": ["POST"], "summary": "切换选中状态", "auth": "bear"},
             {"path": "/select_clear", "endpoint": self._select_clear, "methods": ["GET"], "summary": "清空所有选中", "auth": "bear"},
             {"path": "/select_category", "endpoint": self._select_category, "methods": ["GET"], "summary": "按分类全选/反选可见项目", "auth": "bear"},
             {"path": "/batch_delete_selected", "endpoint": self._batch_delete_selected, "methods": ["POST"], "summary": "删除已选中的项目", "auth": "bear"},
-            {"path": "/request_delete", "endpoint": self._request_delete, "methods": ["GET"], "summary": "发起删除请求（进入待确认）", "auth": "bear"},
-            {"path": "/advance_delete", "endpoint": self._advance_delete, "methods": ["GET"], "summary": "进入最终确认", "auth": "bear"},
-            {"path": "/confirm_delete", "endpoint": self._confirm_delete, "methods": ["GET"], "summary": "确认执行删除", "auth": "bear"},
-            {"path": "/cancel_delete", "endpoint": self._cancel_delete, "methods": ["GET"], "summary": "取消待确认删除", "auth": "bear"},
+            {"path": "/request_delete", "endpoint": self._request_delete, "methods": ["GET"], "summary": "发起删除请求（可一次确认直接执行）", "auth": "bear"},
+            {"path": "/advance_delete", "endpoint": self._advance_delete, "methods": ["GET"], "summary": "（已废弃，保留向后兼容）", "auth": "bear"},
+            {"path": "/confirm_delete", "endpoint": self._confirm_delete, "methods": ["GET"], "summary": "（已废弃，保留向后兼容）", "auth": "bear"},
+            {"path": "/cancel_delete", "endpoint": self._cancel_delete, "methods": ["GET"], "summary": "（已废弃，保留向后兼容）", "auth": "bear"},
             {"path": "/refresh", "endpoint": self._refresh, "methods": ["GET"], "summary": "刷新当前结果视图", "auth": "bear"},
         ]
 
@@ -206,6 +220,11 @@ class MediaGarbageCleaner(_PluginBase):
                         "placeholder": "如: 保种|种子|seed",
                         "hint": "不区分大小写，匹配文件名和父目录名",
                     }},
+                    # ---- 一一对应扫描：用于判断下载目录与媒体库是否严格对应，均为可选 ----
+                    {"component": "VSwitch", "props": {"model": "scan_library_entity", "label": "媒体库实体文件扫描（库内非软链的真文件，直接占库空间；可勾选删除改回软链）"}},
+                    {"component": "VSwitch", "props": {"model": "scan_download_dup", "label": "下载库冗余扫描（媒体库已有实体副本的下载源文件，删除不会丢失内容）"}},
+                    {"component": "VSwitch", "props": {"model": "scan_zero_byte", "label": "零字节文件扫描（下载中断或未完成的空文件残留）"}},
+                    {"component": "VSwitch", "props": {"model": "scan_orphan_media_dir", "label": "孤儿媒体目录扫描（媒体库里只有刮削元数据、无任何视频的目录）"}},
                     {"component": "VCombobox", "props": {
                         "model": "orphan_scan_source_dirs",
                         "label": "源目录列表（按此目录里存在的 strm 判断整理目录里哪些是孤儿）",
@@ -228,7 +247,9 @@ class MediaGarbageCleaner(_PluginBase):
             }
         ], {"enabled": False, "exclude_dirs": [], "dup_only_video": True, "protect_name_keywords": "",
             "orphan_scan_enabled": False, "orphan_scan_source_dirs": [], "orphan_scan_keep_disks": "",
-            "untransfer_scan_enabled": False, "delete_to_trash": True, "reserved_keywords": ""}
+            "untransfer_scan_enabled": False, "delete_to_trash": True, "reserved_keywords": "",
+            "scan_library_entity": False, "scan_download_dup": False,
+            "scan_zero_byte": False, "scan_orphan_media_dir": False}
 
     # ==================== 目录候选（下拉选项） ====================
 
@@ -655,12 +676,9 @@ class MediaGarbageCleaner(_PluginBase):
         select_clear_api = f"plugin/MediaGarbageCleaner/select_clear?token={api_token}"
         batch_delete_api = f"plugin/MediaGarbageCleaner/batch_delete_selected?token={api_token}"
         refresh_api = f"plugin/MediaGarbageCleaner/refresh?token={api_token}"
-        # 两级确认删除（防误删）
-        request_selected_api = f"plugin/MediaGarbageCleaner/request_delete?mode=selected&token={api_token}"
-        request_all_api = f"plugin/MediaGarbageCleaner/request_delete?mode=all&token={api_token}"
-        advance_delete_api = f"plugin/MediaGarbageCleaner/advance_delete?token={api_token}"
-        confirm_delete_api = f"plugin/MediaGarbageCleaner/confirm_delete?token={api_token}"
-        cancel_delete_api = f"plugin/MediaGarbageCleaner/cancel_delete?token={api_token}"
+        # 一次确认删除：本次点击即执行，严谨性由删除前的实时校验保证
+        request_selected_api = f"plugin/MediaGarbageCleaner/request_delete?mode=selected&immediate=1&token={api_token}"
+        request_all_api = f"plugin/MediaGarbageCleaner/request_delete?mode=all&immediate=1&token={api_token}"
 
         # 每个分类各自的全选/反选按钮（按分组独立选择，不互相干扰）
         cat_sel = lambda prefix: [
@@ -673,51 +691,9 @@ class MediaGarbageCleaner(_PluginBase):
         selected = self._selected or {}
         selected_count = len(selected)
 
-        # 顶部提醒区：待确认删除（两级） > 选中摘要 > 说明
+        # 顶部提醒区：仅保留选中摘要。删除改为一次确认（点击即执行），
+        # 严谨性不靠多次弹窗，而靠删除前的实时校验。
         head_alerts: List[dict] = []
-        pending = self._pending_delete
-        if pending:
-            stage = int(pending.get("stage") or 1)
-            p_count = pending.get("count", 0)
-            p_size = self._format_size(int(pending.get("size") or 0))
-            p_mode = "全部删除" if pending.get("mode") == "all" else "删除选中"
-            if stage <= 1:
-                head_alerts.append({
-                    "component": "VAlert",
-                    "props": {"type": "warning", "variant": "flat", "class": "mb-4"},
-                    "content": [
-                        {"component": "div", "props": {"class": "text-subtitle-2 mb-1"}, "text": f"待确认：{p_mode}"},
-                        {"component": "div", "props": {"class": "text-body-2 mb-2"},
-                         "text": f"将删除 {p_count} 项，预计释放 {p_size}。此操作不可撤销，请再次确认。"},
-                        {"component": "div", "props": {"class": "d-flex ga-2"}, "content": [
-                            {"component": "VBtn", "props": {"size": "small", "color": "warning", "variant": "flat"},
-                             "text": "继续确认",
-                             "events": {"click": {"api": advance_delete_api, "method": "get"}}},
-                            {"component": "VBtn", "props": {"size": "small", "color": "grey", "variant": "text"},
-                             "text": "取消",
-                             "events": {"click": {"api": cancel_delete_api, "method": "get"}}},
-                        ]},
-                    ],
-                })
-            else:
-                head_alerts.append({
-                    "component": "VAlert",
-                    "props": {"type": "error", "variant": "flat", "class": "mb-4"},
-                    "content": [
-                        {"component": "div", "props": {"class": "text-subtitle-2 mb-1"}, "text": f"最后确认：{p_mode}"},
-                        {"component": "div", "props": {"class": "text-body-2 mb-2"},
-                         "text": f"即将永久删除 {p_count} 项（{p_size}）。确认后无法恢复！"},
-                        {"component": "div", "props": {"class": "d-flex ga-2"}, "content": [
-                            {"component": "VBtn", "props": {"size": "small", "color": "error", "variant": "flat",
-                                                             "prepend-icon": "mdi-delete-alert"},
-                             "text": "确认删除（不可撤销）",
-                             "events": {"click": {"api": confirm_delete_api, "method": "get"}}},
-                            {"component": "VBtn", "props": {"size": "small", "color": "grey", "variant": "text"},
-                             "text": "取消",
-                             "events": {"click": {"api": cancel_delete_api, "method": "get"}}},
-                        ]},
-                    ],
-                })
         if selected_count:
             try:
                 sel_size = self._format_size(self._sum_items_size(self._resolve_selected_items()))
@@ -726,22 +702,37 @@ class MediaGarbageCleaner(_PluginBase):
             head_alerts.append({
                 "component": "VAlert",
                 "props": {"type": "info", "variant": "tonal", "density": "compact", "class": "mb-4"},
-                "text": f"已选中 {selected_count} 项，预计释放 {sel_size}。点击「删除选中」后需经过二次确认才会执行。",
+                "text": f"已选中 {selected_count} 项，预计释放 {sel_size}。点击「删除选中」立即执行；"
+                        f"命中保护规则或前提不再成立的项会被自动跳过并单独报告。",
             })
 
         page: List[dict] = head_alerts + [
+            # 对应关系摘要：直接回答下载目录与媒体库是否已一一对应
+            *self._correspondence_panel(results.get("correspondence")),
             # 顶部说明
             {"component": "VAlert", "props": {"type": "info", "variant": "tonal", "density": "compact", "class": "mb-4"},
-             "text": "扫描媒体库中的断链软链接、硬链接、重复文件、空目录与失败整理记录。每一类可单独「全选/反选」，选中后批量清理或逐项删除。删除后会自动刷新并推送通知。"},
+             "text": "扫描媒体库中的断链软链接、硬链接、重复文件、空目录与失败整理记录，以及下载目录未整理资源、库内实体文件、零字节文件与孤儿媒体目录。每一类可单独「全选/反选」，选中后批量清理或逐项删除。删除后会自动刷新并推送通知。"},
             # 安全说明
             {"component": "VAlert", "props": {"type": "success", "variant": "tonal", "density": "compact", "class": "mb-4"},
-             "text": "保护：命中「勿删/保种/契约」等标记的路径不扫描不删除；下载器仍在做种或下载的文件不会列为未整理资源；删除走回收站可恢复（可在设置页关闭）。"},
+             "text": "保护：命中「勿删/保种/契约」等标记的路径不扫描不删除；下载器仍在做种或下载的文件不会列为未整理资源；未整理资源删除前反查整理记录；下载库冗余要求媒体库实体副本确实存在才放行；孤儿目录删除前复核确无有效视频；删除走回收站可恢复（可在设置页关闭）。"},
             # 统计卡片（对齐运维助手 tonal 卡片）
             {"component": "VRow", "content": [
                 self._stat_card("断链软链接", str(summary.get("broken_symlinks", 0)), "mdi-link-variant-off", "error", "指向已丢失的目标"),
                 self._stat_card("硬链接", str(summary.get("hardlinks", 0)), "mdi-link-variant", "secondary", "可清理的冗余硬链"),
                 self._stat_card("重复文件", str(summary.get("duplicates", 0)), "mdi-file-compare", "deep-purple", "内容相同的独立副本"),
                 self._stat_card("空目录", str(summary.get("empty_dirs", 0)), "mdi-folder-remove-outline", "warning", "无内容的目录"),
+            ]},
+            {"component": "VRow", "content": [
+                self._stat_card("失败整理记录", str(summary.get("failed_transfers", 0)), "mdi-alert-circle-outline", "info", "整理失败的记录"),
+                self._stat_card("孤儿 strm", str(summary.get("orphan_streams", 0)), "mdi-cloud-off", "deep-orange", "源目录已删除"),
+                self._stat_card("未整理资源", str(summary.get("untransferred", 0)), "mdi-download-off", "cyan", "下载目录中未入库"),
+                self._stat_card("零字节文件", str(summary.get("zero_byte", 0)), "mdi-file-remove-outline", "lime", "无内容残留"),
+            ]},
+            {"component": "VRow", "content": [
+                self._stat_card("库内实体文件", str(summary.get("library_entity", 0)), "mdi-file-video-outline", "teal", "直接占库空间"),
+                self._stat_card("下载库冗余", str(summary.get("download_duplicate_of_entity", 0)), "mdi-file-tray-arrow-up-outline", "light-green", "库内已有实体副本"),
+                self._stat_card("孤儿媒体目录", str(summary.get("orphan_media_dir", 0)), "mdi-folder-account-off-outline", "orange", "只剩刮削元数据"),
+                self._stat_card("垃圾合计", str(total), "mdi-broom", "error", "全部可清理项"),
             ]},
             # 动作按钮（网格块级按钮）
             {"component": "VRow", "content": [
@@ -868,6 +859,89 @@ class MediaGarbageCleaner(_PluginBase):
                 ))
             page.append(self._section_card("下载目录未整理资源", "mdi-download-off", "cyan", len(untransferred), rows, header_actions=cat_sel("u")))
 
+        # 媒体库实体文件（非软链，直接占库空间）
+        library_entity = results.get("library_entity", [])
+        if library_entity:
+            total_entity_size = self._format_size(self._sum_items_size([{"path": i.get("path", "")} for i in library_entity]))
+            page.append({
+                "component": "VAlert", "props": {"type": "info", "variant": "tonal", "density": "compact", "class": "mb-2"},
+                "text": f"共 {len(library_entity)} 个实体文件，合计占用 {total_entity_size}。这些是拷贝或直落进库的，不走下载器更新链路。删除后需重新整理为软链才能恢复播放。",
+            })
+            rows = []
+            for i, item in enumerate(library_entity[:100]):
+                path = item.get("path", "")
+                key = f"l:{i}"
+                display = path if len(path) <= 80 else "…" + path[-77:]
+                sub = f"分类: {item.get('category', '')}｜作品: {item.get('media_dir', '')}｜{self._format_size(item.get('size', 0))}｜删除后需重新整理"
+                rows.append(self._item_row(
+                    key=key, title=display, subtitle=sub,
+                    is_selected=key in selected, toggle_api=toggle_api,
+                    delete_api=delete_api, delete_params={"type": "library_entity", "path": path},
+                ))
+            page.append(self._section_card("媒体库实体文件", "mdi-file-video-outline", "teal", len(library_entity), rows, header_actions=cat_sel("l")))
+
+        # 下载库冗余（媒体库已有实体副本）
+        download_dup = results.get("download_duplicate_of_entity", [])
+        if download_dup:
+            total_dup_size = self._format_size(self._sum_items_size([{"path": i.get("path", "")} for i in download_dup]))
+            page.append({
+                "component": "VAlert", "props": {"type": "success", "variant": "tonal", "density": "compact", "class": "mb-2"},
+                "text": f"共 {len(download_dup)} 个，合计 {total_dup_size}。媒体库中已有独立实体副本，删除这些下载源不会丢失内容。删除前会实时复核前提是否仍然成立。",
+            })
+            rows = []
+            for i, item in enumerate(download_dup[:100]):
+                path = item.get("path", "")
+                key = f"r:{i}"
+                display = path if len(path) <= 80 else "…" + path[-77:]
+                sub = f"{self._format_size(item.get('size', 0))}｜{item.get('safe_reason', '')}"
+                rows.append(self._item_row(
+                    key=key, title=display, subtitle=sub,
+                    is_selected=key in selected, toggle_api=toggle_api,
+                    delete_api=delete_api, delete_params={"type": "download_duplicate_of_entity", "path": path},
+                ))
+            page.append(self._section_card("下载库冗余（库内已有实体副本）", "mdi-file-tray-arrow-up-outline", "light-green", len(download_dup), rows, header_actions=cat_sel("r")))
+
+        # 零字节文件
+        zero_byte = results.get("zero_byte", [])
+        if zero_byte:
+            page.append({
+                "component": "VAlert", "props": {"type": "success", "variant": "tonal", "density": "compact", "class": "mb-2"},
+                "text": f"共 {len(zero_byte)} 个零字节文件，不占用空间也不含内容，是最可以无条件清理的一类。删除前会复核文件仍为空。",
+            })
+            rows = []
+            for i, item in enumerate(zero_byte[:100]):
+                path = item.get("path", "")
+                key = f"z:{i}"
+                display = path if len(path) <= 80 else "…" + path[-77:]
+                sub = f"目录: {item.get('parent', '')}｜0 B"
+                rows.append(self._item_row(
+                    key=key, title=display, subtitle=sub,
+                    is_selected=key in selected, toggle_api=toggle_api,
+                    delete_api=delete_api, delete_params={"type": "zero_byte", "path": path},
+                ))
+            page.append(self._section_card("零字节文件", "mdi-file-remove-outline", "lime", len(zero_byte), rows, header_actions=cat_sel("z")))
+
+        # 孤儿媒体目录（只剩刮削元数据）
+        orphan_media_dir = results.get("orphan_media_dir", [])
+        if orphan_media_dir:
+            total_omd_size = self._format_size(self._sum_items_size([{"type": "orphan_media_dir", "path": i.get("path", "")} for i in orphan_media_dir]))
+            page.append({
+                "component": "VAlert", "props": {"type": "warning", "variant": "tonal", "density": "compact", "class": "mb-2"},
+                "text": f"共 {len(orphan_media_dir)} 个目录，合计 {total_omd_size}。媒体库里只残留了 nfo/海报等刮削产物，视频已不存在，播放必然失败。删除前会复核目录内确实没有有效视频。",
+            })
+            rows = []
+            for i, item in enumerate(orphan_media_dir[:100]):
+                path = item.get("path", "")
+                key = f'o:{i}'
+                display = path if len(path) <= 80 else "…" + path[-77:]
+                sub = f"{item.get('file_count', 0)} 个元数据文件｜{self._format_size(item.get('size', 0))}"
+                rows.append(self._item_row(
+                    key=key, title=display, subtitle=sub,
+                    is_selected=key in selected, toggle_api=toggle_api,
+                    delete_api=delete_api, delete_params={"type": "orphan_media_dir", "path": path},
+                ))
+            page.append(self._section_card("孤儿媒体目录（只剩刮削元数据）", "mdi-folder-account-off-outline", "orange", len(orphan_media_dir), rows, header_actions=cat_sel("o")))
+
         # 未扫描占位
         if not has_results:
             page.append({
@@ -896,12 +970,494 @@ class MediaGarbageCleaner(_PluginBase):
 
     # ==================== 扫描逻辑 ====================
 
+    def _collect_media_files(self, force_refresh: bool = False) -> Tuple[List[str], List[str], List[str]]:
+        """一次遍历收集媒体库与下载目录中的视频文件，供多个扫描分类共用。
+
+        返回 (库内软链, 库内实体, 下载目录实体)。
+
+        一次遍历而非各扫描方法各自遍历：媒体库与下载目录体量通常很大，
+        重复遍历会明显拖慢扫描，且各分类各自遍历容易出现口径不一致
+        （例如同一遍统计数字不同），导致界面上给出的判断互相矛盾。
+        本方法带进程内缓存，同一次扫描只真正遍历一次；
+        缓存必须在文件发生实际变更时才失效（见 _scan_all 与删除分支），
+        不能无条件每次重算，否则等于没有缓存。
+
+        口径统一约定：
+        - 软链只按 realpath 建集合，用于判断下载源是否已被媒体库引用；
+        - 实体文件同时按 realpath 和 (st_dev, st_ino) 双键判断，覆盖跨设备硬链接
+          与同一设备上的硬链接两种情况；
+        - 所有分类都排除保留标记目录（勿删/保种/契约等），保证"给出的信息"与
+          "能删的选项"来自同一份范围。
+        """
+        if not force_refresh and self._media_files_cache is not None:
+            return self._media_files_cache
+        media_exts = self._video_exts or {
+            ".mkv", ".mp4", ".avi", ".ts", ".flv", ".rmvb", ".wmv", ".m4v", ".mpg", ".iso"
+        }
+
+        lib_links: List[str] = []
+        lib_entities: List[str] = []
+        for lib_dir in self._get_library_dirs():
+            if not os.path.isdir(lib_dir):
+                continue
+            try:
+                for root, dirs, files in os.walk(lib_dir):
+                    if self._is_excluded(root) or self._is_reserved(root):
+                        continue
+                    dirs[:] = [
+                        d for d in dirs
+                        if not (self._is_excluded(os.path.join(root, d)) or self._is_reserved(os.path.join(root, d)))
+                    ]
+                    for name in files:
+                        if os.path.splitext(name)[1].lower() not in media_exts:
+                            continue
+                        filepath = os.path.join(root, name)
+                        if os.path.islink(filepath):
+                            lib_links.append(filepath)
+                        elif os.path.isfile(filepath):
+                            lib_entities.append(filepath)
+            except Exception as e:
+                logger.error(f"遍历媒体库目录出错 ({lib_dir}): {e}")
+
+        dl_entities: List[str] = []
+        download_dirs: set = set()
+        for d in self._load_dir_configs():
+            dp = getattr(d, "download_path", None)
+            if dp and str(dp).strip():
+                download_dirs.add(str(dp).strip())
+        for fallback in ("/media/downloads/BT下载", "/media/downloads"):
+            if os.path.isdir(fallback):
+                download_dirs.add(fallback)
+
+        for dl_dir in download_dirs:
+            if not os.path.isdir(dl_dir):
+                continue
+            try:
+                for root, dirs, files in os.walk(dl_dir):
+                    if self._is_excluded(root) or self._is_reserved(root):
+                        continue
+                    dirs[:] = [
+                        d for d in dirs
+                        if not (self._is_excluded(os.path.join(root, d)) or self._is_reserved(os.path.join(root, d)))
+                    ]
+                    for name in files:
+                        if os.path.splitext(name)[1].lower() not in media_exts:
+                            continue
+                        filepath = os.path.join(root, name)
+                        if os.path.islink(filepath):
+                            continue
+                        dl_entities.append(filepath)
+            except Exception as e:
+                logger.error(f"遍历下载目录出错 ({dl_dir}): {e}")
+
+        result = (lib_links, lib_entities, dl_entities)
+        self._media_files_cache = result
+        logger.info(
+            f"媒体文件遍历完成：库内软链 {len(lib_links)} 个，"
+            f"库内实体 {len(lib_entities)} 个，下载目录实体 {len(dl_entities)} 个"
+        )
+        return result
+
+    def _is_media_dir(self, path: str) -> bool:
+        """判断一个媒体库子目录是否是"媒体目录"。
+
+        媒体目录指顶层分类目录下的第一部作品目录，典型特征是至少包含一个
+        刮削产物（.nfo/.jpg/.png 等）或视频文件。仅凭"是目录"就判为媒体目录
+        会把整棵目录树都当成孤儿候选，数量虚高且不可读。
+        """
+        if not path or not os.path.isdir(path):
+            return False
+        try:
+            for name in os.listdir(path):
+                if name.lower().endswith(".nfo"):
+                    return True
+                ext = os.path.splitext(name)[1].lower()
+                if ext in (".jpg", ".jpeg", ".png", ".webp"):
+                    return True
+                if ext in self._video_exts or ext in {".mkv", ".mp4", ".avi", ".ts", ".iso"}:
+                    return True
+        except OSError:
+            return False
+        return False
+
+    def _scan_library_entity(self) -> List[Dict[str, Any]]:
+        """扫描媒体库中的实体视频文件（非软链，真占库空间）。
+
+        正常整理链路是软链接模式，媒体库文件本身只有几百字节。实体文件意味着
+        这批资源是拷贝或直落进库的，不走下载器更新链路——新集不会自动进来。
+        因此这一类是"信息为主"：用户需要据此决定是保留、还是删除后重新整理成软链。
+        列入候选不代表默认要删，只是让占比最大的一块空间变得可见可控。
+        """
+        if not self._scan_library_entity:
+            return []
+        _, lib_entities, _ = self._collect_media_files()
+        found: List[Dict[str, Any]] = []
+        for p in lib_entities:
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            found.append({
+                "path": p,
+                "size": st.st_size,
+                "mtime": st.st_mtime,
+                "media_dir": os.path.basename(os.path.dirname(p)),
+                "category": os.path.basename(os.path.dirname(os.path.dirname(p))),
+                "item_type": "library_entity",
+            })
+        # 大的在前：实体文件通常集中在一类内容里，按体积排最能暴露空间去向
+        found.sort(key=lambda x: x.get("size", 0), reverse=True)
+        return found
+
+    def _scan_download_duplicate_of_entity(self) -> List[Dict[str, Any]]:
+        """扫描下载目录中"媒体库已有实体副本"的源文件。
+
+        判断下载目录与媒体库是否一一对应时，这类文件是最容易被误删的：
+        它们不是断链（媒体库里有内容），但媒体库那份是实体拷贝而非指向下载源的软链，
+        所以"软链目标引用"检查查不到它们，会被误当成"未整理资源"。
+        真实情况是内容两份都在，删下载源不会丢失任何内容——但必须先把这个前提
+        写进条目里，否则用户无法判断该不该删。
+
+        排除条件：媒体库那份是软链且指向此源文件的，不算冗余（那是正常整理结果）。
+        """
+        if not self._scan_download_dup:
+            return []
+        lib_links, lib_entities, dl_entities = self._collect_media_files()
+
+        # 媒体库实体内容：realpath + inode 双键
+        entity_real = set()
+        entity_ino = set()
+        for p in lib_entities:
+            try:
+                entity_real.add(os.path.normpath(os.path.realpath(p)))
+                st = os.stat(p)
+                entity_ino.add((st.st_dev, st.st_ino))
+            except OSError:
+                continue
+
+        # 下载源被媒体库软链正常引用的，不算冗余
+        link_real = set()
+        for p in lib_links:
+            try:
+                link_real.add(os.path.normpath(os.path.realpath(p)))
+            except OSError:
+                continue
+
+        found: List[Dict[str, Any]] = []
+        for p in dl_entities:
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            rp = os.path.normpath(os.path.realpath(p))
+            if rp in link_real:
+                continue
+            if rp in entity_real or (st.st_dev, st.st_ino) in entity_ino:
+                found.append({
+                    "path": p,
+                    "size": st.st_size,
+                    "mtime": st.st_mtime,
+                    "parent": os.path.basename(os.path.dirname(p)),
+                    "item_type": "download_duplicate_of_entity",
+                    "safe_reason": "媒体库已有独立实体副本，删除下载源不会丢失内容",
+                })
+        found.sort(key=lambda x: x.get("size", 0), reverse=True)
+        return found
+
+    def _scan_zero_byte(self) -> List[Dict[str, Any]]:
+        """扫描下载目录中的零字节媒体文件（下载中断或未完成的残留）。
+
+        这类文件 0 字节、不含任何内容，也没有数据库 ID 可识别，
+        是唯一可以无条件删除的媒体类垃圾。单独成类而不是混入未整理资源：
+        未整理资源里绝大多数是有效正片，混在一起会让删除选项变得不清晰。
+        """
+        if not self._scan_zero_byte:
+            return []
+        _, _, dl_entities = self._collect_media_files()
+        found: List[Dict[str, Any]] = []
+        for p in dl_entities:
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            if st.st_size != 0:
+                continue
+            found.append({
+                "path": p,
+                "size": 0,
+                "mtime": st.st_mtime,
+                "parent": os.path.basename(os.path.dirname(p)),
+                "item_type": "zero_byte",
+                "safe_reason": "零字节文件，不含任何内容",
+            })
+        found.sort(key=lambda x: x.get("mtime", 0))
+        return found
+
+    def _scan_orphan_media_dir(self) -> List[Dict[str, Any]]:
+        """扫描媒体库中只剩刮削元数据、无任何视频或链接的媒体目录。
+
+        来源场景：源文件被清理后，媒体库里留下 tvshow.nfo / poster.jpg / S01E01.nfo
+        一整套刮削产物，但对应视频已经不存在。这类目录在库中占着条目、
+        播放时必然失败，是"断链"的目录级形态——文件级扫描只能查到单个断链，
+        查不到这种整目录只剩元数据的情况。
+
+        判定要求三项同时满足，缺一即不算，避免误伤正常的媒体目录：
+        1) 是媒体目录（含 .nfo 或刮削图片）；
+        2) 目录内递归无任何视频实体文件；
+        3) 目录内递归无任何有效软链（软链目标存在）。
+        """
+        if not self._scan_orphan_media_dir:
+            return []
+        video_exts = self._video_exts or {".mkv", ".mp4", ".avi", ".ts", ".iso", ".m4v", ".mpg"}
+
+        found: List[Dict[str, Any]] = []
+        for lib_dir in self._get_library_dirs():
+            if not os.path.isdir(lib_dir):
+                continue
+            try:
+                for root, dirs, files in os.walk(lib_dir):
+                    if root == lib_dir:
+                        continue
+                    if self._is_excluded(root) or self._is_reserved(root):
+                        continue
+                    if not self._is_media_dir(root):
+                        continue
+                    # 自身有视频文件则不是孤儿
+                    has_video = any(
+                        os.path.splitext(f)[1].lower() in video_exts
+                        for f in files
+                        if not os.path.islink(os.path.join(root, f))
+                    )
+                    if has_video:
+                        continue
+                    # 递归检查子目录：任一有效视频或有效软链即不算孤儿
+                    has_valid_media = False
+                    for sub_root, sub_dirs, sub_files in os.walk(root):
+                        for f in sub_files:
+                            fp = os.path.join(sub_root, f)
+                            if os.path.islink(fp):
+                                if os.path.exists(fp):
+                                    has_valid_media = True
+                                    break
+                            elif os.path.splitext(f)[1].lower() in video_exts and os.path.isfile(fp):
+                                has_valid_media = True
+                                break
+                        if has_valid_media:
+                            break
+                    if has_valid_media:
+                        continue
+                    # 目录内实际大小（仅刮削产物，通常几十 KB 到几 MB）
+                    total_size = 0
+                    file_count = 0
+                    for f in files:
+                        try:
+                            fp = os.path.join(root, f)
+                            if os.path.isfile(fp):
+                                total_size += os.path.getsize(fp)
+                                file_count += 1
+                        except OSError:
+                            continue
+                    # 只统计顶层文件数量用于展示，避免把整个子树计进去
+                    found.append({
+                        "path": root,
+                        "size": total_size,
+                        "file_count": file_count,
+                        "media_dir": os.path.basename(root),
+                        "item_type": "orphan_media_dir",
+                        "safe_reason": "目录内仅有刮削元数据，无任何视频或有效链接",
+                    })
+            except Exception as e:
+                logger.error(f"扫描孤儿媒体目录出错 ({lib_dir}): {e}")
+        found.sort(key=lambda x: os.path.getmtime(x["path"]) if os.path.isdir(x["path"]) else 0)
+        return found
+
+    def _correspondence_panel(self, corr: Optional[Dict[str, Any]]) -> List[dict]:
+        """渲染下载目录与媒体库的对应关系面板。
+
+        垃圾数量只说明"有哪些可清理"，回答不了"两边是否已经对应齐全"。
+        这个面板把核对所需的原始口径摆出来，用户可以直接判断：
+        - 媒体库软链是否全部有效（断链是否为 0）；
+        - 下载源是否全部被媒体库引用（未引用是否为 0）；
+        - 未引用的下载源里，有多少是"库内已有实体副本"的安全冗余；
+        - 剩余的未引用项列出前 10 个文件名样例，方便逐条判断性质
+          （保种按约定保留、库内已有重复片、花絮短片、空文件等），
+          而不是给一个笼统的数字让用户猜。
+        """
+        if not corr:
+            return [{
+                "component": "VAlert", "props": {"type": "info", "variant": "tonal", "density": "compact", "class": "mb-4"},
+                "text": "尚未扫描，暂无对应关系摘要。点击「开始扫描」后此处会显示下载目录与媒体库的一一对应情况。",
+            }]
+
+        links_total = corr.get("library_softlinks_total", 0)
+        links_valid = corr.get("library_softlinks_valid", 0)
+        broken_cnt = corr.get("library_broken_links", 0)
+        dl_total = corr.get("download_sources_total", 0)
+        dl_ref = corr.get("download_referenced", 0)
+        dl_unref = corr.get("download_unreferenced", 0)
+        entity_dup = corr.get("entity_duplicate_sources", 0)
+        entity_cnt = corr.get("library_entity_count", 0)
+        entity_size = corr.get("library_entity_size", 0)
+
+        # 结论：只有三项都满足才敢说"已一一对应"
+        # 1) 无断链；2) 下载源全部被软链引用；3) 库内无游离实体文件
+        closed = broken_cnt == 0 and dl_unref == 0 and entity_cnt == 0
+        lines: List[str] = [
+            f"媒体库软链 {links_total} 个（有效 {links_valid}、断链 {broken_cnt}）",
+            f"下载源 {dl_total} 个（已被软链引用 {dl_ref}、未被引用 {dl_unref}）",
+            f"其中 {entity_dup} 个属于「库内已有实体副本」的安全冗余",
+            f"媒体库实体文件 {entity_cnt} 个，占用 {self._format_size(entity_size)}",
+        ]
+        text = "；".join(lines) + "。"
+        if closed:
+            verdict = "结论：下载目录与媒体库已完全一一对应。"
+        else:
+            verdict = "结论：尚未完全一一对应，请按下列项逐个确认性质后再决定处理方式。"
+        text += verdict
+
+        panel: List[dict] = [{
+            "component": "VAlert",
+            "props": {
+                "type": "success" if closed else "warning",
+                "variant": "tonal", "density": "compact", "class": "mb-2",
+            },
+            "content": [
+                {"component": "div", "props": {"class": "text-subtitle-2 mb-1"}, "text": "下载目录 ↔ 媒体库 对应关系"},
+                {"component": "div", "props": {"class": "text-body-2"}, "text": text},
+            ],
+        }]
+
+        # 未被引用的下载源样例：给出文件名而不是笼统数字，用户才能判断每条的性质
+        examples = corr.get("download_unreferenced_examples") or []
+        if examples:
+            rows = []
+            for p in examples:
+                display = p if len(p) <= 90 else "…" + p[-87:]
+                rows.append({
+                    "component": "VListItem", "props": {"density": "compact"},
+                    "content": [
+                        {"component": "VListItemTitle",
+                         "props": {"class": "text-caption", "style": "font-family: monospace; word-break: break-all;"},
+                         "text": display},
+                    ],
+                })
+            panel.append({
+                "component": "VCard", "props": {"variant": "outlined", "class": "mb-4"},
+                "content": [
+                    {
+                        "component": "VCardTitle",
+                        "props": {"class": "text-subtitle-2 d-flex align-center px-4 py-2"},
+                        "content": [
+                            {"component": "VIcon", "props": {"icon": "mdi-file-eye-outline", "color": "warning", "class": "mr-2", "size": "small"}},
+                            {"component": "span", "text": f"未被引用的下载源样例（共 {dl_unref} 个，最多显示 10 个）"},
+                            {"component": "VSpacer"},
+                        ],
+                    },
+                    {"component": "VDivider"},
+                    {"component": "VCardText", "props": {"class": "text-caption mb-1 py-0"},
+                     "text": "未引用不等于垃圾：可能是保种按约定保留、媒体库已有其它版本、花絮短片或空文件。此类不自动列入删除候选。"},
+                    {"component": "VList", "props": {"density": "compact", "class": "py-2"}, "content": rows},
+                ],
+            })
+        return panel
+
+    def _build_correspondence(self, lib_links: List[str], lib_entities: List[str],
+
+                              dl_entities: List[str]) -> Dict[str, Any]:
+        """计算下载目录与媒体库的一一对应关系摘要。
+
+        仅统计"垃圾分类数量"不够：用户真正要判断的是两边的引用关系是否闭合。
+        这里给出可核对的原始口径，让界面直接回答"是否已一一对应"：
+
+        - library_softlinks_total / valid / broken：媒体库软链总数与有效性
+        - download_sources_total / referenced：下载源总数与已被软链引用数
+        - download_unreferenced：下载源中未被任何媒体库软链引用的文件数
+          （这类不等于垃圾：可能是保种契约按约定保留、已在库的重复片、
+            无 ID 的花絮或空文件，因此只报告数量与样例，不自动列入删除）
+        - library_entity_count / size：媒体库实体文件数与占用
+        - entity_duplicate_sources：下载源里"库内已有实体副本"的数量
+
+        软链只按 realpath 比对；实体同时按 realpath 与 (st_dev, st_ino) 比对，
+        覆盖跨设备硬链接。口径与 _scan_download_duplicate_of_entity 保持一致，
+        避免页面顶部摘要与下方分类列表数字对不上。
+        """
+        link_real = set()
+        broken_links = 0
+        for p in lib_links:
+            if not os.path.exists(p):
+                broken_links += 1
+                continue
+            try:
+                link_real.add(os.path.normpath(os.path.realpath(p)))
+            except OSError:
+                continue
+
+        entity_real = set()
+        entity_ino = set()
+        entity_size = 0
+        for p in lib_entities:
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            entity_size += st.st_size
+            try:
+                entity_real.add(os.path.normpath(os.path.realpath(p)))
+                entity_ino.add((st.st_dev, st.st_ino))
+            except OSError:
+                continue
+
+        referenced = 0
+        unreferenced: List[str] = []
+        entity_dup = 0
+        for p in dl_entities:
+            try:
+                rp = os.path.normpath(os.path.realpath(p))
+                st = os.stat(p)
+            except OSError:
+                continue
+            if rp in link_real:
+                referenced += 1
+                continue
+            if rp in entity_real or (st.st_dev, st.st_ino) in entity_ino:
+                entity_dup += 1
+            unreferenced.append(p)
+
+        return {
+            "library_softlinks_total": len(lib_links),
+            "library_softlinks_valid": len(lib_links) - broken_links,
+            "library_broken_links": broken_links,
+            "download_sources_total": len(dl_entities),
+            "download_referenced": referenced,
+            "download_unreferenced": len(unreferenced),
+            "download_unreferenced_examples": unreferenced[:10],
+            "library_entity_count": len(lib_entities),
+            "library_entity_size": entity_size,
+            "entity_duplicate_sources": entity_dup,
+        }
+
     def _scan_all(self) -> dict:
         """执行全量扫描，返回所有垃圾项。
 
         每个分类独立捕获异常：单个扫描方法失败只降级该分类为空列表，
         不影响其它分类，也不让整次扫描返回 500 导致用户误以为什么都没扫到。
+        同时给出下载目录与媒体库的对应关系摘要，用于直接回答"是否已一一对应"。
         """
+        # 本次扫描重新遍历，缓存必须失效：沿用上一轮的遍历结果会导致
+        # 期间新增/删除的文件在摘要与候选里状态相反
+        self._media_files_cache = None
+        # 先遍历一次并缓存，对应关系摘要与各文件类扫描共用这份结果，
+        # 避免同一份目录树在一次扫描里被遍历多次
+        lib_links, lib_entities, dl_entities = self._collect_media_files()
+        results = {}
+        results["correspondence"] = self._build_correspondence(lib_links, lib_entities, dl_entities)
+        logger.info(
+            f"对应关系摘要：库内软链 {results['correspondence']['library_softlinks_total']} 个"
+            f"（有效 {results['correspondence']['library_softlinks_valid']}、断链 {results['correspondence']['library_broken_links']}），"
+            f"下载源 {results['correspondence']['download_sources_total']} 个"
+            f"（已引用 {results['correspondence']['download_referenced']}、未引用 {results['correspondence']['download_unreferenced']}），"
+            f"库内实体 {results['correspondence']['library_entity_count']} 个"
+        )
         scanners = (
             ("broken_symlinks", self._scan_broken_symlinks),
             ("hardlinks", self._scan_hardlinks),
@@ -910,8 +1466,11 @@ class MediaGarbageCleaner(_PluginBase):
             ("failed_transfers", self._scan_failed_transfers),
             ("orphan_streams", self._scan_orphan_streams),
             ("untransferred", self._scan_untransferred),
+            ("library_entity", self._scan_library_entity),
+            ("download_duplicate_of_entity", self._scan_download_duplicate_of_entity),
+            ("zero_byte", self._scan_zero_byte),
+            ("orphan_media_dir", self._scan_orphan_media_dir),
         )
-        results = {}
         for key, fn in scanners:
             try:
                 results[key] = fn()
@@ -926,9 +1485,15 @@ class MediaGarbageCleaner(_PluginBase):
             "failed_transfers": len(results["failed_transfers"]),
             "orphan_streams": len(results["orphan_streams"]),
             "untransferred": len(results["untransferred"]),
-            "total": len(results["broken_symlinks"]) + len(results["hardlinks"]) + len(results["duplicates"])
-            + len(results["empty_dirs"]) + len(results["failed_transfers"]) + len(results["orphan_streams"])
-            + len(results["untransferred"]),
+            "library_entity": len(results["library_entity"]),
+            "download_duplicate_of_entity": len(results["download_duplicate_of_entity"]),
+            "zero_byte": len(results["zero_byte"]),
+            "orphan_media_dir": len(results["orphan_media_dir"]),
+            "total": sum(len(results[k]) for k in (
+                "broken_symlinks", "hardlinks", "duplicates", "empty_dirs", "failed_transfers",
+                "orphan_streams", "untransferred", "library_entity", "download_duplicate_of_entity",
+                "zero_byte", "orphan_media_dir",
+            )),
         }
         self._scan_results = results
         # 重新扫描后旧的选中/待确认状态已失效：选中项存的是「分类:序号」，
@@ -1592,11 +2157,21 @@ class MediaGarbageCleaner(_PluginBase):
             logger.error(f"反查 TransferHistory 失败，保守拒绝删除: {path}, err={e}")
             return "query_error"
 
-    def _delete_item(self, data: dict, silent: bool = False) -> dict:
-        """删除单个垃圾项。"""
+    def _delete_item(self, data: Optional[dict] = None, silent: bool = False) -> dict:
+        """删除单个垃圾项。
+
+        同时支持 POST body 与 GET 查询参数两种传入方式：页面里的行内删除按钮
+        走 GET + 查询参数（前端事件不携带 body），直接调用时仍可用 POST body。
+        """
+        if data is None:
+            data = {}
         item_type = data.get("type") or data.get("item_type")
-        path = data.get("path", "")
+        path = data.get("path", "") or ""
         item_id = data.get("id")
+        try:
+            item_id = int(item_id) if item_id not in (None, "") else None
+        except (TypeError, ValueError):
+            item_id = None
 
         # 统一守卫：保留路径不参与任何清理（保种/契约/勿删等标记目录）
         if item_type != "failed_transfer" and path and self._is_reserved(path):
@@ -1606,8 +2181,8 @@ class MediaGarbageCleaner(_PluginBase):
                 self._notify_result("删除被拒绝", msg, fail=True)
             return {"success": False, "message": msg}
 
-        # 页面单条直删必须经过两级确认：仅当 _confirm_delete 设置了确认令牌时放行。
-        # silent=True 表示由 _batch_delete_selected / _delete_all 在确认流程内调用，同样放行。
+        # 单条删除守卫：silent=True 表示由批量删除/全部删除流程内调用，直接放行。
+        # _delete_item_confirmed 令牌由 _request_delete(immediate=True) 一次性设置。
         if not silent and not self._delete_item_confirmed:
             logger.warning(f"拒绝未经确认的单条删除: {path}")
             msg = f"未经确认流程，已拒绝删除: {os.path.basename(path)}"
@@ -1730,6 +2305,110 @@ class MediaGarbageCleaner(_PluginBase):
                     self._notify_result("删除完成", msg)
                 return {"success": True, "message": msg}
 
+            elif item_type == "zero_byte" and os.path.isfile(path) and not os.path.islink(path):
+                # 零字节文件：不含任何内容，无条件可删。删除前复核大小，
+                # 防止扫描之后文件被写入内容（例如下载续传补全）而被误删。
+                try:
+                    if os.path.getsize(path) != 0:
+                        msg = f"文件已不再为空，已拒绝删除: {os.path.basename(path)}"
+                        logger.warning(msg)
+                        self._notify_result("删除被拒绝", msg, fail=True)
+                        return {"success": False, "message": msg}
+                except OSError:
+                    msg = f"文件不存在，已跳过: {os.path.basename(path)}"
+                    return {"success": False, "message": msg}
+                os.remove(path)
+                self._scan_results["zero_byte"] = [x for x in self._scan_results.get("zero_byte", []) if x.get("path") != path]
+                self._update_summary()
+                self.save_data("scan_results", self._scan_results)
+                msg = f"已删除零字节文件: {os.path.basename(path)}"
+                if not silent:
+                    self._notify_result("删除完成", msg)
+                return {"success": True, "message": msg}
+
+            elif item_type == "download_duplicate_of_entity" and os.path.isfile(path) and not os.path.islink(path):
+                # 下载库中媒体库已有实体副本的源文件：删除不会丢失内容，
+                # 但这是本次最容易被误判的一类，删除前必须实时复核前提——
+                # 媒体库里那份必须是真实体且仍然存在。扫描时成立、删除时前提
+                # 已变化（例如那份实体被别的操作删了），此时删下载源就会造成
+                # 真丢失，所以前提不再成立就直接拒绝。
+                if not self._has_library_entity_copy(path):
+                    msg = f"媒体库实体副本已不存在，前提不成立，已拒绝删除: {os.path.basename(path)}"
+                    logger.warning(msg)
+                    self._notify_result("删除被拒绝", msg, fail=True)
+                    return {"success": False, "message": msg}
+                # 保种/契约等保留路径不删
+                if self._is_reserved(path):
+                    msg = f"保留路径，已拒绝删除: {os.path.basename(path)}"
+                    self._notify_result("删除被拒绝", msg, fail=True)
+                    return {"success": False, "message": msg}
+                mode_used, removed_msg = self._remove_file(path)
+                self._scan_results["download_duplicate_of_entity"] = [
+                    x for x in self._scan_results.get("download_duplicate_of_entity", []) if x.get("path") != path
+                ]
+                self._update_summary()
+                self.save_data("scan_results", self._scan_results)
+                msg = f"{removed_msg}冗余下载源: {os.path.basename(path)}"
+                if not silent:
+                    self._notify_result("删除完成", msg)
+                return {"success": True, "message": msg}
+
+            elif item_type == "library_entity" and os.path.isfile(path) and not os.path.islink(path):
+                # 媒体库实体文件：删除后需要用户重新整理为软链才能恢复播放，
+                # 这一步不是自动的，所以在界面文案里已经写明"删除后需重新整理"。
+                if self._is_reserved(path):
+                    msg = f"保留路径，已拒绝删除: {os.path.basename(path)}"
+                    self._notify_result("删除被拒绝", msg, fail=True)
+                    return {"success": False, "message": msg}
+                mode_used, removed_msg = self._remove_file(path)
+                self._scan_results["library_entity"] = [x for x in self._scan_results.get("library_entity", []) if x.get("path") != path]
+                self._update_summary()
+                self.save_data("scan_results", self._scan_results)
+                msg = f"{removed_msg}媒体库实体文件: {os.path.basename(path)}"
+                if not silent:
+                    self._notify_result("删除完成", msg)
+                return {"success": True, "message": msg}
+
+            elif item_type == "orphan_media_dir":
+                # 孤儿媒体目录：只有刮削元数据、无视频。这里必须实时复核"无有效视频"，
+                # 因为该判定是整个删除操作安全性的唯一依据——如果用户在扫描后又把
+                # 视频拷回这个目录，无条件 rmtree 就会删掉真内容。复核不通过即拒绝。
+                if not os.path.isdir(path):
+                    return {"success": False, "message": f"目录不存在，已跳过: {os.path.basename(path)}"}
+                if self._is_reserved(path):
+                    msg = f"保留路径，已拒绝删除: {os.path.basename(path)}"
+                    self._notify_result("删除被拒绝", msg, fail=True)
+                    return {"success": False, "message": msg}
+                video_exts = self._video_exts or {".mkv", ".mp4", ".avi", ".ts", ".iso", ".m4v", ".mpg"}
+                for dirpath, _dirnames, filenames in os.walk(path):
+                    for f in filenames:
+                        fp = os.path.join(dirpath, f)
+                        if os.path.islink(fp):
+                            if os.path.exists(fp) and os.path.splitext(f)[1].lower() in video_exts:
+                                msg = f"目录内已存在有效视频链接，前提不成立，已拒绝删除: {os.path.basename(path)}"
+                                logger.warning(msg)
+                                self._notify_result("删除被拒绝", msg, fail=True)
+                                return {"success": False, "message": msg}
+                        elif os.path.splitext(f)[1].lower() in video_exts and os.path.isfile(fp):
+                            msg = f"目录内已存在视频文件，前提不成立，已拒绝删除: {os.path.basename(path)}"
+                            logger.warning(msg)
+                            self._notify_result("删除被拒绝", msg, fail=True)
+                            return {"success": False, "message": msg}
+                try:
+                    shutil.rmtree(path)
+                except OSError as e:
+                    msg = f"删除孤儿目录失败: {os.path.basename(path)}（{e}）"
+                    logger.error(msg)
+                    self._notify_result("删除失败", msg, fail=True)
+                    return {"success": False, "message": msg}
+                self._scan_results["orphan_media_dir"] = [x for x in self._scan_results.get("orphan_media_dir", []) if x.get("path") != path]
+                self._update_summary()
+                self.save_data("scan_results", self._scan_results)
+                msg = f"已删除孤儿媒体目录: {os.path.basename(path)}"
+                if not silent:
+                    self._notify_result("删除完成", msg)
+                return {"success": True, "message": msg}
+
             msg = "无法删除（项目可能已不存在或参数不匹配）"
             if not silent:
                 self._notify_result("删除失败", msg, fail=True)
@@ -1783,6 +2462,34 @@ class MediaGarbageCleaner(_PluginBase):
         self._notify_result("全部删除完成", msg, fail=bool(fail_count))
         return {"success": fail_count == 0, "message": msg}
 
+    def _has_library_entity_copy(self, download_path: str) -> bool:
+        """实时判断媒体库中是否存在 download_path 的独立实体副本。
+
+        用于「下载库冗余」删除前的前提复核：只有媒体库里那份是实体文件
+        （不是软链、且未被删除）时，删下载源才真正安全。跨设备与同设备的
+        硬链接、实体拷贝两种情况都要覆盖，因此同时按 realpath 和
+        (st_dev, st_ino) 双键比对。
+        """
+        target_real = os.path.normpath(os.path.realpath(download_path))
+        target_ino: Optional[Tuple[int, int]] = None
+        try:
+            st = os.stat(download_path)
+            target_ino = (st.st_dev, st.st_ino)
+        except OSError:
+            target_ino = None
+
+        _, lib_entities, _ = self._collect_media_files()
+        for p in lib_entities:
+            try:
+                if os.path.normpath(os.path.realpath(p)) == target_real:
+                    return True
+                st = os.stat(p)
+                if target_ino and (st.st_dev, st.st_ino) == target_ino:
+                    return True
+            except OSError:
+                continue
+        return False
+
     def _update_summary(self):
         """更新统计信息。"""
         results = self._scan_results
@@ -1794,10 +2501,16 @@ class MediaGarbageCleaner(_PluginBase):
             "failed_transfers": len(results.get("failed_transfers", [])),
             "orphan_streams": len(results.get("orphan_streams", [])),
             "untransferred": len(results.get("untransferred", [])),
+            "library_entity": len(results.get("library_entity", [])),
+            "download_duplicate_of_entity": len(results.get("download_duplicate_of_entity", [])),
+            "zero_byte": len(results.get("zero_byte", [])),
+            "orphan_media_dir": len(results.get("orphan_media_dir", [])),
             "total": len(results.get("broken_symlinks", [])) + len(results.get("hardlinks", []))
             + len(results.get("duplicates", [])) + len(results.get("empty_dirs", []))
             + len(results.get("failed_transfers", [])) + len(results.get("orphan_streams", []))
-            + len(results.get("untransferred", [])),
+            + len(results.get("untransferred", [])) + len(results.get("library_entity", []))
+            + len(results.get("download_duplicate_of_entity", [])) + len(results.get("zero_byte", []))
+            + len(results.get("orphan_media_dir", [])),
         }
 
     # ==================== 交互端点（选中 / 批量 / 刷新） ====================
@@ -1826,7 +2539,8 @@ class MediaGarbageCleaner(_PluginBase):
         页面每类最多展示前 100 条，key 形如 b:<i> / h:<i> / e:<i> / f:<i>。
         category 为 None 时返回所有分类。category 取值：b/h/e/f。
         """
-        mapping = (("broken_symlinks", "b"), ("hardlinks", "h"), ("duplicates", "d"), ("empty_dirs", "e"), ("orphan_streams", "s"), ("failed_transfers", "f"), ("untransferred", "u"))
+        mapping = (("broken_symlinks", "b"), ("hardlinks", "h"), ("duplicates", "d"), ("empty_dirs", "e"), ("orphan_streams", "s"), ("failed_transfers", "f"), ("untransferred", "u"),
+                   ("library_entity", "l"), ("download_duplicate_of_entity", "r"), ("zero_byte", "z"), ("orphan_media_dir", "o"))
         if category:
             mapping = [m for m in mapping if m[1] == category]
         keys: List[str] = []
@@ -1841,7 +2555,7 @@ class MediaGarbageCleaner(_PluginBase):
         category: b(断链软链) / h(硬链) / e(空目录) / f(失败记录)
         mode: all(全选) / invert(反选)
         """
-        if category not in ("b", "h", "e", "f", "s", "u"):
+        if category not in ("b", "h", "e", "f", "s", "u", "l", "r", "z", "o"):
             return {"success": False, "message": "无效的分类"}
         keys = self._visible_keys(category)
         if mode == "invert":
@@ -1902,16 +2616,40 @@ class MediaGarbageCleaner(_PluginBase):
             items.append({"type": "orphan_stream", "path": it.get("path", "")})
         for it in results.get("untransferred", []):
             items.append({"type": "untransferred", "path": it.get("path", "")})
+        for it in results.get("library_entity", []):
+            items.append({"type": "library_entity", "path": it.get("path", "")})
+        for it in results.get("download_duplicate_of_entity", []):
+            items.append({"type": "download_duplicate_of_entity", "path": it.get("path", "")})
+        for it in results.get("zero_byte", []):
+            items.append({"type": "zero_byte", "path": it.get("path", "")})
+        for it in results.get("orphan_media_dir", []):
+            items.append({"type": "orphan_media_dir", "path": it.get("path", "")})
         return [i for i in items if i.get("path") or i.get("id")]
 
     @staticmethod
     def _sum_items_size(items: List[dict]) -> int:
-        """累加待删除项占用的字节数（目录/记录按 0 计）。"""
+        """累加待删除项占用的字节数（记录类按 0 计）。
+
+        目录类项目（孤儿媒体目录）需要递归统计子树大小，否则界面上显示的
+        "预计释放"会严重偏低，用户对删除影响范围的判断就不可靠了。
+        """
         total = 0
         for it in items:
             p = it.get("path")
             if not p:
                 continue
+            if it.get("type") == "orphan_media_dir":
+                try:
+                    if os.path.isdir(p):
+                        for dirpath, dirnames, filenames in os.walk(p):
+                            for f in filenames:
+                                try:
+                                    total += os.path.getsize(os.path.join(dirpath, f))
+                                except OSError:
+                                    continue
+                    continue
+                except OSError:
+                    continue
             try:
                 total += os.path.getsize(p)
             except OSError:
@@ -1921,8 +2659,25 @@ class MediaGarbageCleaner(_PluginBase):
                     continue
         return total
 
-    def _request_delete(self, mode: str = "selected") -> dict:
-        """第一步：发起删除请求，仅计算摘要并进入待确认状态。"""
+    def _request_delete(self, data: Optional[dict] = None, mode: str = "selected",
+                        immediate: bool = False) -> dict:
+        """发起删除请求。
+
+        页面按钮走 GET + 查询参数，mode 与 immediate 从请求字典中读取；
+        POST 调用仍可按关键字传入。
+
+        immediate=False：仅计算摘要并进入待确认状态（保留旧的两步流程，供已有
+        页面或外部调用继续使用）。
+        immediate=True：本次点击即为唯一确认，立即执行删除，不再要求二次确认。
+
+        严谨性不来自确认次数，而来自删除前的实时校验：
+        - 保留标记目录（勿删/保种/契约等）强制拒绝；
+        - 下载器在册文件（仍在做种/下载）豁免；
+        - 未整理资源强制反查 TransferHistory，曾整理过的一律拒绝；
+        - 下载库冗余要求媒体库实体副本确实存在，前提不成立即拒绝；
+        - 零字节文件删除前复核仍为 0 字节；
+        - 孤儿媒体目录删除前复核目录内确无有效视频。
+        """
         if mode == "all":
             items = self._collect_all_items()
         else:
@@ -1930,11 +2685,23 @@ class MediaGarbageCleaner(_PluginBase):
         if not items:
             return {"success": False, "message": "没有可删除的项目"}
         size = self._sum_items_size(items)
-        self._pending_delete = {
-            "mode": "all" if mode == "all" else "selected",
-            "count": len(items), "size": size, "stage": 1,
-        }
-        return {"success": True, "count": len(items), "size": size, "stage": 1}
+        if not immediate:
+            self._pending_delete = {
+                "mode": "all" if mode == "all" else "selected",
+                "count": len(items), "size": size, "stage": 1,
+            }
+            return {"success": True, "count": len(items), "size": size, "stage": 1}
+
+        # 一次确认：直接执行。先清掉任何历史遗留的待确认状态，避免残留状态误导
+        self._pending_delete = None
+        # 一次性放行令牌：允许删除通过 _delete_item 的确认守卫，执行完立即复位
+        self._delete_item_confirmed = True
+        try:
+            if mode == "all":
+                return self._delete_all(silent=True)
+            return self._batch_delete_selected(silent=True)
+        finally:
+            self._delete_item_confirmed = False
 
     def _advance_delete(self) -> dict:
         """第二步：进入最终确认。"""
@@ -1966,7 +2733,7 @@ class MediaGarbageCleaner(_PluginBase):
 
     # ==================== 批量删除 ====================
 
-    def _batch_delete_selected(self, data: dict = None, silent: bool = False) -> dict:
+    def _batch_delete_selected(self, data: Optional[dict] = None, silent: bool = False) -> dict:
         """删除所有已选中的项目（已修复硬链/重复文件批量删除缺失的 bug）。"""
         if not silent and not self._delete_item_confirmed:
             logger.warning("拒绝未经确认的批量删除")
