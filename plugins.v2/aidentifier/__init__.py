@@ -607,7 +607,7 @@ class AIdentifier(_PluginBase):
     def _verify_tmdb(self, guess: AIGuess) -> Optional[Any]:
         """回查 TMDB，未命中返回 None。"""
         try:
-            from app.chain import MediaChain
+            from app.chain.media import MediaChain
 
             raw_text = guess.name
             meta = MetaInfo(raw_text)
@@ -746,7 +746,7 @@ class AIdentifier(_PluginBase):
     def _retrigger_transfer(self, path: str, mediainfo: Any, guess: AIGuess) -> bool:
         """重新触发整理。"""
         try:
-            from app.chain import TransferChain
+            from app.chain.transfer import TransferChain
             from app.schemas import FileItem
 
             # 构建 FileItem
