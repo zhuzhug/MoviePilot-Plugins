@@ -515,9 +515,10 @@ class AIdentifier(_PluginBase):
         return ChatPromptTemplate.from_messages([
             ("system",
              "你是影视资源识别专家。给定文件名和路径，提炼出标准化的影视标题、年份、季集信息。"
-             "只输出 JSON，格式为 {\"name\": \"标题\", \"year\": \"年份\", \"media_type\": \"movie/tv\", "
-             "\"season\": 季号, \"episode\": 集号, \"confidence\": 置信度, \"reason\": \"原因\"}。"
-             "置信度范围 0-1，不确定时降低置信度。"),
+             "只输出 JSON，格式为 "
+             '{{"name": "标题", "year": "年份", "media_type": "movie/tv", '
+             '"season": 季号, "episode": 集号, "confidence": 置信度, "reason": "原因"}}'
+             "。置信度范围 0-1，不确定时降低置信度。"),
             ("human", "文件名: {title}\n路径: {path}")
         ])
 
@@ -585,13 +586,14 @@ class AIdentifier(_PluginBase):
             ("system",
              "你是 MoviePilot 自定义识别词专家。根据给定的文件名、路径、AI 猜测结果和 TMDB 命中的媒体信息，"
              "生成窄作用域的识别词规则。\n"
-             "规则格式：`被替换词 => 替换目标{[tmdbid=xxx;type=movie/tv]}`\n"
+             "规则格式：`被替换词 => 替换目标{{[tmdbid=xxx;type=movie/tv]}}`\n"
              "要求：\n"
              "1. 左值（被替换词）要窄作用域、样例特定，避免裸通用词\n"
              "2. 优先用文件名中的独特片段作为锚点\n"
              "3. 替换目标要包含正确的标题、季集号和 TMDB ID\n"
              "4. 生成 1-3 条候选规则，按置信度降序\n"
-             "只输出 JSON，格式为 {\"candidates\": [{\"rule\": \"规则\", \"confidence\": 置信度, \"reason\": \"原因\"}]}"),
+             "只输出 JSON，格式为 "
+             '{{"candidates": [{{"rule": "规则", "confidence": 置信度, "reason": "原因"}}]}}'),
             ("human",
              "文件名: {title}\n"
              "路径: {path}\n"
