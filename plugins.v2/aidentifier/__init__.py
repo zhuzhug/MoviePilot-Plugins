@@ -37,8 +37,8 @@ class AIGuess(BaseModel):
     name: str = Field(default="", description="标准化后的影视标题；无法判断时返回空字符串")
     year: str = Field(default="", description="四位年份；无法判断时返回空字符串")
     media_type: str = Field(default="unknown", description="movie、tv 或 unknown")
-    season: int = Field(default=0, description="剧集季号，电影填 0")
-    episode: int = Field(default=0, description="剧集集号，电影或未知填 0")
+    season: Optional[int] = Field(default=None, description="剧集季号，电影或未知填 None")
+    episode: Optional[int] = Field(default=None, description="剧集集号，电影或未知填 None")
     confidence: float = Field(default=0.0, description="0 到 1 之间的置信度")
     reason: str = Field(default="", description="简短说明为什么这样判断")
 
@@ -63,7 +63,7 @@ class AIdentifier(_PluginBase):
     plugin_name = "AI识别词"
     plugin_desc = "原生识别失败时接入 AI 二次识别，TMDB 命中后安全沉淀窄作用域识别词并重新整理。写入前全量快照比对、只增不删、写后逐行校验，杜绝清空用户自带识别词的风险。"
     plugin_icon = "mdi-robot-outline"
-    plugin_version = "1.0.1"
+    plugin_version = "1.0.2"
     plugin_label = "识别,增强"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "aidentifier_"
