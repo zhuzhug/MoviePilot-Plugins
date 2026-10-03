@@ -75,7 +75,7 @@ class AIPair(_PluginBase):
     plugin_name = "AI双引擎识别"
     plugin_desc = "整合 AI 识别增强与 AI 识别词：原生识别失败时做结构化兜底（救当次），成功后沉淀窄作用域识别词（救以后）。识别词写入走全量快照比对、只增不删、写后逐行校验，杜绝清空用户识别词。致谢 liuyuexi1987 的开源识别增强实现。"
     plugin_icon = "mdi-robot-outline"
-    plugin_version = "1.0.7"
+    plugin_version = "1.0.8"
     plugin_label = "识别,增强"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "aipair_"
@@ -102,6 +102,13 @@ class AIPair(_PluginBase):
     _max_rule_length: int = 200
     _review_mode: bool = False
     _notify_on_write: bool = False
+    # 独立大模型配置（默认关闭，使用 MoviePilot 默认 AI）
+    _use_custom_llm: bool = False
+    _custom_llm_provider: str = ""
+    _custom_llm_api_key: str = ""
+    _custom_llm_base_url: str = ""
+    _custom_llm_model: str = ""
+    _custom_llm_api_protocol: str = ""
 
     # 识别词写入锁（本插件是唯一写入方，单锁足够）
     _identifier_lock = threading.Lock()
@@ -135,6 +142,12 @@ class AIPair(_PluginBase):
         self._max_rule_length = int(config.get("max_rule_length") or 200)
         self._review_mode = bool(config.get("review_mode", False))
         self._notify_on_write = bool(config.get("notify_on_write", False))
+        self._use_custom_llm = bool(config.get("use_custom_llm", False))
+        self._custom_llm_provider = str(config.get("custom_llm_provider") or "")
+        self._custom_llm_api_key = str(config.get("custom_llm_api_key") or "")
+        self._custom_llm_base_url = str(config.get("custom_llm_base_url") or "")
+        self._custom_llm_model = str(config.get("custom_llm_model") or "")
+        self._custom_llm_api_protocol = str(config.get("custom_llm_api_protocol") or "")
         self._systemconfig = SystemConfigOper()
         self._load_cooldown_records()
         self._load_settled_titles()
@@ -350,7 +363,20 @@ class AIPair(_PluginBase):
         return value
 
     def _get_llm(self):
-        """获取 LLM 实例。"""
+        """获取 LLM 实例。若启用独立大模型则传入自定义配置，否则用 MP 默认。"""
+        if self._use_custom_llm:
+            kwargs = {"streaming": False}
+            if self._custom_llm_provider:
+                kwargs["provider"] = self._custom_llm_provider
+            if self._custom_llm_model:
+                kwargs["model"] = self._custom_llm_model
+            if self._custom_llm_api_key:
+                kwargs["api_key"] = self._custom_llm_api_key
+            if self._custom_llm_base_url:
+                kwargs["base_url"] = self._custom_llm_base_url
+            if self._custom_llm_api_protocol:
+                kwargs["api_protocol"] = self._custom_llm_api_protocol
+            return self._run_async_compatible(LLMHelper.get_llm(**kwargs))
         return self._run_async_compatible(LLMHelper.get_llm(streaming=False))
 
     @staticmethod
@@ -408,6 +434,12 @@ class AIPair(_PluginBase):
                 "max_rule_length": self._max_rule_length,
                 "review_mode": self._review_mode,
                 "notify_on_write": self._notify_on_write,
+                "use_custom_llm": self._use_custom_llm,
+                "custom_llm_provider": self._custom_llm_provider,
+                "custom_llm_api_key": self._custom_llm_api_key,
+                "custom_llm_base_url": self._custom_llm_base_url,
+                "custom_llm_model": self._custom_llm_model,
+                "custom_llm_api_protocol": self._custom_llm_api_protocol,
             }
             config.update(overrides or {})
             self.update_config(config)
@@ -1947,7 +1979,29 @@ AI 识别增强结果：
                 "summary": "确认写入规则",
                 "auth": "bear",
             },
+            {
+                "path": "/test_llm",
+                "endpoint": self.api_test_llm,
+                "methods": ["POST"],
+                "summary": "测试当前大模型配置是否可用",
+            },
         ]
+
+    async def api_test_llm(self, request: Request):
+        """测试当前大模型配置是否可用（用一条简短提示词验证连通性）。"""
+        ok, message = self._check_api_access(request)
+        if not ok:
+            return {"success": False, "message": message}
+        try:
+            llm = self._get_llm()
+            from langchain_core.prompts import ChatPromptTemplate
+            prompt = ChatPromptTemplate.from_messages([("human", "请只回复两个字：正常")])
+            chain = prompt | llm
+            response = chain.invoke({}, config={"configurable": {"timeout": 20}})
+            reply = LLMHelper.extract_text_content(response.content, fallback_to_string=True) if hasattr(response, "content") else str(response)
+            return {"success": True, "message": f"测试成功，模型返回：{str(reply)[:50]}", "data": {"llm_ready": True}}
+        except Exception as exc:
+            return {"success": False, "message": f"测试失败：{exc}", "data": {"llm_ready": False}}
 
     async def api_health(self, request: Request):
         """检查插件运行状态。"""
@@ -2121,10 +2175,7 @@ AI 识别增强结果：
     # ==================== 详情页面 ====================
 
     def get_page(self) -> Optional[List[dict]]:
-        """返回插件详情页面。"""
-        if not self._enabled:
-            return None
-
+        """返回插件详情页面（即使未启用也显示基础状态）。"""
         llm_ready = bool(getattr(settings, "LLM_API_KEY", None))
         llm_provider = getattr(settings, "LLM_PROVIDER", "—")
         llm_model = getattr(settings, "LLM_MODEL", "—")
@@ -2247,29 +2298,63 @@ AI 识别增强结果：
                     {
                         "component": "VRow",
                         "content": [
-                            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                                {"component": "VTextField", "props": {"model": "confidence_threshold", "label": "兜底注入置信度阈值", "type": "number", "hint": "低于该值的结果不注入，默认 0.65", "persistent-hint": True}},
+                            {"component": "VCol", "props": {"cols": 12, "sm": 6}, "content": [
+                                {"component": "VTextField", "props": {"variant": "outlined", "model": "confidence_threshold", "label": "兜底注入置信度阈值", "density": "comfortable", "type": "number", "hint": "低于此值不注入", "persistent-hint": True}},
                             ]},
-                            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                                {"component": "VTextField", "props": {"model": "request_timeout", "label": "LLM 请求超时（秒）", "type": "number", "hint": "默认 25 秒", "persistent-hint": True}},
+                            {"component": "VCol", "props": {"cols": 12, "sm": 6}, "content": [
+                                {"component": "VTextField", "props": {"variant": "outlined", "model": "request_timeout", "label": "LLM 请求超时（秒）", "density": "comfortable", "type": "number", "hint": "默认 25 秒", "persistent-hint": True}},
                             ]},
-                            {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [
-                                {"component": "VTextField", "props": {"model": "max_retries", "label": "结构化输出重试次数", "type": "number", "hint": "默认 2 次", "persistent-hint": True}},
+                            {"component": "VCol", "props": {"cols": 12}, "content": [
+                                {"component": "VTextField", "props": {"variant": "outlined", "model": "max_retries", "label": "结构化输出重试次数", "density": "comfortable", "type": "number", "hint": "默认 2 次", "persistent-hint": True, "style": "margin-bottom: 12px; margin-top: 8px"}},
                             ]},
                         ],
                     },
-                    {"component": "VTextField", "props": {"model": "max_failed_samples", "label": "失败样本保留上限", "type": "number", "hint": "默认保留最近 200 条，并对重复样本自动去重", "persistent-hint": True}},
+                    {"component": "VTextField", "props": {"variant": "outlined", "model": "max_failed_samples", "label": "失败样本保留上限", "type": "number", "hint": "默认保留最近 200 条，并对重复样本自动去重", "persistent-hint": True}},
                     {"component": "VSwitch", "props": {"model": "save_failed_samples", "label": "保存低置信度样本"}},
                     {"component": "VSwitch", "props": {"model": "save_title_only_samples", "label": "保存仅标题样本"}},
                     {"component": "VSwitch", "props": {"model": "auto_remove_applied_sample", "label": "写入识别词后自动移除对应失败样本"}},
                     {"component": "VSwitch", "props": {"model": "clear_failed_samples_once", "label": "保存时清空失败样本（一次性）"}},
                     {"component": "VSwitch", "props": {"model": "write_identifier", "label": "兜底成功后自动沉淀识别词（推荐开启，同类文件以后原生即可识别）"}},
                     {"component": "VSlider", "props": {"model": "write_min_confidence", "label": "识别词沉淀置信度阈值（低于此值不写入）", "min": 0.3, "max": 1.0, "step": 0.05, "thumb-label": "always"}},
-                    {"component": "VTextField", "props": {"model": "cooldown_hours", "label": "冷却时长（小时）", "type": "number", "hint": "同一文件名在此时间内只处理一次", "persistent-hint": True}},
-                    {"component": "VTextField", "props": {"model": "max_rule_lines", "label": "单次写入规则行数上限", "type": "number", "hint": "防止异常情况下批量写入污染识别词库", "persistent-hint": True}},
-                    {"component": "VTextField", "props": {"model": "max_rule_length", "label": "单条规则长度上限（字符）", "type": "number", "hint": "超长规则直接放弃并记入失败样本", "persistent-hint": True}},
+                    {"component": "VTextField", "props": {"variant": "outlined", "model": "cooldown_hours", "label": "冷却时长（小时）", "density": "comfortable", "hint": "同一文件名在此时间内只处理一次", "persistent-hint": True, "style": "margin-bottom: 12px; margin-top: 8px", "type": "number"}},
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
+                                {"component": "VTextField", "props": {"variant": "outlined", "model": "max_rule_lines", "label": "单次写入规则行数上限", "type": "number", "hint": "防止批量写入污染识别词库", "persistent-hint": True}},
+                            ]},
+                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
+                                {"component": "VTextField", "props": {"variant": "outlined", "model": "max_rule_length", "label": "单条规则长度上限（字符）", "type": "number", "hint": "超长规则直接放弃", "persistent-hint": True}},
+                            ]},
+                        ],
+                    },
                     {"component": "VSwitch", "props": {"model": "review_mode", "label": "先审后写模式（规则进待确认队列，人工确认后写入）"}},
                     {"component": "VSwitch", "props": {"model": "notify_on_write", "label": "写入/兜底成功时发送通知"}},
+                    {"component": "VSwitch", "props": {"model": "use_custom_llm", "label": "启用独立大模型（关闭则使用 MoviePilot 默认 AI）"}},
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
+                                {"component": "VTextField", "props": {"variant": "outlined", "model": "custom_llm_provider", "label": "模型提供商（如 OpenAI、Claude）", "hint": "留空则自动推断", "persistent-hint": True}},
+                            ]},
+                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
+                                {"component": "VTextField", "props": {"variant": "outlined", "model": "custom_llm_model", "label": "模型名称", "hint": "如 gpt-4o、claude-3-opus", "persistent-hint": True}},
+                            ]},
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
+                                {"component": "VTextField", "props": {"variant": "outlined", "model": "custom_llm_api_key", "label": "API Key", "type": "password", "hint": "服务端鉴权后不回显", "persistent-hint": True}},
+                            ]},
+                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
+                                {"component": "VTextField", "props": {"variant": "outlined", "model": "custom_llm_base_url", "label": "Base URL", "hint": "自定义接口地址，留空用默认", "persistent-hint": True}},
+                            ]},
+                        ],
+                    },
+                    {"component": "VTextField", "props": {"variant": "outlined", "model": "custom_llm_api_protocol", "label": "API 协议（如 openai、claude）", "hint": "留空则自动推断", "persistent-hint": True}},
+                    {"component": "VBtn", "props": {"color": "primary", "variant": "elevated", "class": "mt-4", "text": "测试大模型连接", "events": {"click": {"api": f"plugin/AIPair/test_llm?apikey={settings.API_TOKEN}", "method": "POST"}}}},
                 ],
             }
         ]
@@ -2291,5 +2376,11 @@ AI 识别增强结果：
             "max_rule_length": 200,
             "review_mode": False,
             "notify_on_write": False,
+            "use_custom_llm": False,
+            "custom_llm_provider": "",
+            "custom_llm_api_key": "",
+            "custom_llm_base_url": "",
+            "custom_llm_model": "",
+            "custom_llm_api_protocol": "",
         }
         return form, defaults
