@@ -75,7 +75,7 @@ class AIPair(_PluginBase):
     plugin_name = "AI双引擎识别"
     plugin_desc = "整合 AI 识别增强与 AI 识别词：原生识别失败时做结构化兜底（救当次），成功后沉淀窄作用域识别词（救以后）。识别词写入走全量快照比对、只增不删、写后逐行校验，杜绝清空用户识别词。致谢 liuyuexi1987 的开源识别增强实现。"
     plugin_icon = "mdi-robot-outline"
-    plugin_version = "1.0.2"
+    plugin_version = "1.0.5"
     plugin_label = "识别,增强"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "aipair_"
@@ -261,6 +261,68 @@ class AIPair(_PluginBase):
         )
 
     @staticmethod
+    def _extract_path_context(path: str) -> Dict[str, Any]:
+        """从目录路径提取结构化上下文（网盘乱名资源：文件名无规律但目录有规律）。
+
+        规则（从文件名上一级目录逐层向上，只取最近的有效信息）：
+        - 季号：目录名含 S01/Season 1/Season 01/第1季/第01季
+        - 集号：目录名或文件名含 EP03/E03/03/第3集/第03集
+        - 作品名：取季号目录之上一级目录名（过滤 Season/SeasonN/Sxx/第N季/季 等季标）
+        """
+        result = {"name": "", "season": 0, "episode": 0, "path_hint": ""}
+        if not path:
+            return result
+        parts = [p.strip() for p in str(path).replace("\\", "/").split("/") if p.strip()]
+        if not parts:
+            return result
+        # 去掉文件名，剩下目录列表
+        dirs = parts[:-1] if len(parts) > 1 else []
+        # 文件名（含集号提取用）
+        fname = parts[-1] if parts else ""
+        season = 0
+        season_idx = -1
+        for i in range(len(dirs) - 1, -1, -1):
+            m = re.search(r"(?i)\bS(?:eason)?[\s._-]*(\d{1,2})\b", dirs[i])
+            if not m:
+                m = re.search(r"第(\d{1,2})季", dirs[i])
+            if m:
+                season = int(m.group(1))
+                season_idx = i
+                break
+        # 目录没找到季号时，回退从文件名提取（如 S02E01乱码文件.mp4）
+        if not season:
+            m = re.search(r"(?i)S(?:eason)?[\s._-]*(\d{1,2})E", fname)
+            if not m:
+                m = re.search(r"第(\d{1,2})季", fname)
+            if m:
+                season = int(m.group(1))
+        episode = 0
+        for text in (fname,):
+            m = re.search(r"(?i)E(?:P)?[\s._-]*(\d{1,3})(?=\D|$)", text)
+            if not m:
+                m = re.search(r"第(\d{1,3})集", text)
+            if m:
+                episode = int(m.group(1))
+                break
+        name = ""
+        if season_idx > 0:
+            name = dirs[season_idx - 1]
+        elif dirs:
+            name = dirs[-1]
+        name = re.sub(r"(?i)\bS(?:eason)?[\s._-]*\d{1,2}\b", "", name)
+        name = re.sub(r"第\d{1,2}季", "", name)
+        name = re.sub(r"第\d{1,2}集", "", name)
+        name = re.sub(r"(?i)^季\b", "", name).strip()
+        name = re.sub(r"^\d+[\s._-]+", "", name).strip()
+        if len(name) < 2:
+            name = ""
+        result["name"] = name
+        result["season"] = season
+        result["episode"] = episode
+        result["path_hint"] = "/".join(dirs[-3:]) if dirs else ""
+        return result
+
+    @staticmethod
     def _build_meta_hint(raw_text: str) -> Dict[str, Any]:
         """构建 MoviePilot 基础解析提示。"""
         try:
@@ -392,6 +454,12 @@ class AIPair(_PluginBase):
         """识别失败主链路：冷却检查 → AI 兜底 → 注入事件 → 沉淀识别词 → 重新整理。"""
         try:
             sample_key = f"{title}|{path}"
+            # 0. 垃圾样本预判：纯字幕/强乱码直接跳过，不调 AI 省 token
+            if self._is_trash_sample(title, path):
+                self._record_abandon("垃圾样本")
+                if self._debug:
+                    logger.info(f"[AI双引擎] 垃圾样本，跳过 AI 兜底: {title or path}")
+                return
             # 1. 冷却检查
             if self._is_cooled_down(sample_key):
                 self._record_abandon("冷却中")
@@ -479,6 +547,8 @@ class AIPair(_PluginBase):
                     logger.info(f"[AI双引擎] 目标不明确，跳过沉淀: {reason}")
                 return
             candidates = [item for item in (data.get("suggestions") or []) if item.get("lines")]
+            # 同义规则语义去重：只差分辨率/发布组等噪音的规则只保留置信度最高的一条
+            candidates = self._dedup_candidates_by_semantics(candidates)
             min_conf = self._write_min_confidence
             strong = [item for item in candidates if self._safe_float(item.get("confidence"), 0.0) >= min_conf]
             chosen = (strong or candidates)[0] if (strong or candidates) else None
@@ -499,8 +569,9 @@ class AIPair(_PluginBase):
                 self._record_abandon("待确认")
                 return
 
-            # 写入
-            apply_result = self._append_custom_identifiers(chosen.get("lines") or [])
+            # 写入（统一模板：分组头 + 作品标记 + 带 tmdbid 后缀的规则行）
+            block_lines = self._build_identifier_block(chosen, target)
+            apply_result = self._append_custom_identifiers(block_lines)
             added = list(apply_result.get("added") or [])
             if not added:
                 self._record_abandon("规则已存在")
@@ -596,6 +667,11 @@ class AIPair(_PluginBase):
         self._record_llm_usage("recognize")
         raw_text = path or title
         meta_hint = self._build_meta_hint(raw_text)
+        # 网盘乱名资源：目录路径往往比文件名更有信息量（如 XX动漫/Season 2/EP03）
+        path_ctx = self._extract_path_context(path) if path else {}
+        if path_ctx:
+            meta_hint = dict(meta_hint or {})
+            meta_hint["path_context"] = path_ctx
         llm = self._get_llm()
         prompt = self._build_prompt()
         chain = prompt | llm
@@ -632,6 +708,7 @@ class AIPair(_PluginBase):
 7. media_type 只能是 movie、tv、unknown。
 8. confidence 范围为 0 到 1。
 9. 只输出 JSON，不要使用 markdown 代码块（```json ... ```）包裹。
+10. 网盘资源文件名常无规律，但目录有规律（如 XX动漫/Season 2/EP03）。当 meta_hint 中有 path_context 时，优先使用目录提取的作品名、季号、集号来填写 name/season/episode，文件名只作辅助。
 """,
             ),
             (
@@ -659,6 +736,13 @@ MoviePilot 当前基础解析提示：
             meta.year = guess.year or None
             meta.begin_season = guess.season or None
             meta.begin_episode = guess.episode or None
+            # 网盘乱名资源：文件名无季集时，从目录上下文补齐
+            if path:
+                path_ctx = self._extract_path_context(path)
+                if not meta.begin_season and path_ctx.get("season"):
+                    meta.begin_season = path_ctx["season"]
+                if not meta.begin_episode and path_ctx.get("episode"):
+                    meta.begin_episode = path_ctx["episode"]
             if guess.media_type == "tv" or meta.begin_season or meta.begin_episode:
                 meta.type = MediaType.TV
             elif guess.media_type == "movie":
@@ -884,6 +968,48 @@ AI 识别增强结果：
         if " >> " in rule and " <> " in rule:
             return True
         return len(rule) >= 4
+
+    @staticmethod
+    def _rule_semantic_key(rule: str) -> str:
+        """构造规则语义键：去掉左侧匹配段的格式/分辨率/发布组噪音，用于同义规则去重。
+
+        同一部作品可能被 LLM 生成多条只差分辨率、发布组、编码前缀的规则，
+        它们指向同一目标，属于同义重复，只保留一条代表性规则即可。
+        """
+        left = str(rule or "").strip()
+        if " => " in left:
+            left = left.split(" => ", 1)[0]
+        for sep in (" && ", " >> "):
+            if sep in left:
+                left = left.split(sep, 1)[0]
+        if " <> " in left:
+            left = left.split(" <> ", 1)[0]
+        # 剔除格式/分辨率/发布组类噪音 token
+        noise = {
+            "1080p", "720p", "2160p", "4k", "uhd", "bluray", "blu-ray", "web-dl",
+            "hdtv", "webrip", "x264", "x265", "hevc", "avc", "remux", "hdr", "diy",
+            "strm", "dmhy", "chinese", "chs", "cht", "mp4", "mkv", "h264", "h265",
+        }
+        parts = re.split(r"[\s._\-\[\]（）()【】]+", left.lower())
+        kept = [p for p in parts if p and p not in noise]
+        return " ".join(kept)
+
+    def _dedup_candidates_by_semantics(self, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """按语义键去重候选规则，同义只保留最高置信度的一条。"""
+        seen: Dict[str, Dict[str, Any]] = {}
+        order: List[str] = []
+        for item in candidates:
+            key = self._rule_semantic_key(item.get("rule") or "")
+            if not key:
+                continue
+            conf = self._safe_float(item.get("confidence"), 0.0)
+            if key in seen:
+                if conf > self._safe_float(seen[key].get("confidence"), 0.0):
+                    seen[key] = item
+            else:
+                seen[key] = item
+                order.append(key)
+        return [seen[k] for k in order]
 
     def _is_rule_too_broad(self, rule: str, target: Dict[str, Any]) -> bool:
         """判断识别词规则是否作用域过宽，过宽则拒绝沉淀，防止污染识别词库。
@@ -1122,6 +1248,41 @@ AI 识别增强结果：
         if line.startswith("#"):
             return [line]
         return [f"{self._AI_MARK}{line}", line]
+
+    def _build_identifier_block(self, chosen: Dict[str, Any], target: Dict[str, Any]) -> List[str]:
+        """生成统一模板的识别词块：分组头 + 作品标记 + 多条规则行（每条带 tmdbid 后缀）。
+
+        模板：
+            # ==================== 作品名（tmdbid=xxx）====================
+            # 【作品名】
+            旧名1 => 作品名{[tmdbid=xxx;type=tv]}
+            旧名2 => 作品名{[tmdbid=xxx;type=tv]}
+        """
+        chosen = chosen or {}
+        target = target or {}
+        tmdb_id = self._safe_int(target.get("tmdb_id"), 0)
+        title = str(target.get("name") or "").strip()
+        media_type = self._normalize_media_type(target.get("media_type"))
+        type_tag = "tv" if media_type == "tv" else "movies"
+        # 规则行来源：优先用 LLM 生成的多条 lines（去注释），否则用单条 rule
+        raw_lines = [str(x or "").strip() for x in (chosen.get("lines") or []) if str(x or "").strip()]
+        rules = [x for x in raw_lines if not x.startswith("#") and " => " in x]
+        if not rules:
+            r = str(chosen.get("rule") or "").strip()
+            if r and " => " in r:
+                rules = [r]
+        if not tmdb_id or not title or not rules:
+            # fallback：无法构建模板时用原始方式
+            return [f"{self._AI_MARK}{x}" for x in (rules or [str(chosen.get("rule") or "")]) if x] + rules
+        header = f"# ==================== {title}（tmdbid={tmdb_id}）===================="
+        mark_line = f"# 【{title}】"
+        # 分组头/作品标记本身以 # 开头，_mark_identifier_line 会原样保留，不需再加 MARK
+        out: List[str] = [header, mark_line]
+        for rule in rules:
+            left = rule.split(" => ", 1)[0].strip()
+            new_rule = f"{left} => {title}{{[tmdbid={tmdb_id};type={type_tag}]}}"
+            out.append(new_rule)
+        return out
 
     def _remove_custom_identifiers(self, lines: List[str]) -> Dict[str, Any]:
         """移除指定识别词行，用于写入回放失败后的回滚。"""
