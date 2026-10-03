@@ -75,7 +75,7 @@ class AIPair(_PluginBase):
     plugin_name = "AI双引擎识别"
     plugin_desc = "整合 AI 识别增强与 AI 识别词：原生识别失败时做结构化兜底（救当次），成功后沉淀窄作用域识别词（救以后）。识别词写入走全量快照比对、只增不删、写后逐行校验，杜绝清空用户识别词。致谢 liuyuexi1987 的开源识别增强实现。"
     plugin_icon = "mdi-robot-outline"
-    plugin_version = "1.0.5"
+    plugin_version = "1.0.6"
     plugin_label = "识别,增强"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "aipair_"
@@ -1276,12 +1276,12 @@ AI 识别增强结果：
             return [f"{self._AI_MARK}{x}" for x in (rules or [str(chosen.get("rule") or "")]) if x] + rules
         header = f"# ==================== {title}（tmdbid={tmdb_id}）===================="
         mark_line = f"# 【{title}】"
-        # 分组头/作品标记本身以 # 开头，_mark_identifier_line 会原样保留，不需再加 MARK
-        out: List[str] = [header, mark_line]
+        # 分组头/作品标记/规则行都带 _AI_MARK，便于识别词列表中一眼看出来源
+        out: List[str] = [f"{self._AI_MARK}{header}", f"{self._AI_MARK}{mark_line}"]
         for rule in rules:
             left = rule.split(" => ", 1)[0].strip()
             new_rule = f"{left} => {title}{{[tmdbid={tmdb_id};type={type_tag}]}}"
-            out.append(new_rule)
+            out.append(f"{self._AI_MARK}{new_rule}")
         return out
 
     def _remove_custom_identifiers(self, lines: List[str]) -> Dict[str, Any]:
