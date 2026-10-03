@@ -75,7 +75,7 @@ class AIPair(_PluginBase):
     plugin_name = "AI双引擎识别"
     plugin_desc = "整合 AI 识别增强与 AI 识别词：原生识别失败时做结构化兜底（救当次），成功后沉淀窄作用域识别词（救以后）。识别词写入走全量快照比对、只增不删、写后逐行校验，杜绝清空用户识别词。致谢 liuyuexi1987 的开源识别增强实现。"
     plugin_icon = "mdi-robot-outline"
-    plugin_version = "1.0.8"
+    plugin_version = "1.0.9"
     plugin_label = "识别,增强"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "aipair_"
@@ -1999,9 +1999,13 @@ AI 识别增强结果：
             chain = prompt | llm
             response = chain.invoke({}, config={"configurable": {"timeout": 20}})
             reply = LLMHelper.extract_text_content(response.content, fallback_to_string=True) if hasattr(response, "content") else str(response)
-            return {"success": True, "message": f"测试成功，模型返回：{str(reply)[:50]}", "data": {"llm_ready": True}}
+            result_msg = f"测试成功，模型返回：{str(reply)[:50]}"
+            self.save_data("last_llm_test", {"ok": True, "msg": result_msg})
+            return {"success": True, "message": result_msg, "data": {"llm_ready": True}}
         except Exception as exc:
-            return {"success": False, "message": f"测试失败：{exc}", "data": {"llm_ready": False}}
+            result_msg = f"测试失败：{exc}"
+            self.save_data("last_llm_test", {"ok": False, "msg": result_msg})
+            return {"success": False, "message": result_msg, "data": {"llm_ready": False}}
 
     async def api_health(self, request: Request):
         """检查插件运行状态。"""
@@ -2275,6 +2279,7 @@ AI 识别增强结果：
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         """返回插件配置表单与默认配置。"""
         failed_samples_count = len(self._read_failed_samples(limit=self._failed_sample_cap()))
+        last_test = self.get_data("last_llm_test") or {}
         form = [
             {
                 "component": "VForm",
@@ -2354,7 +2359,12 @@ AI 识别增强结果：
                         ],
                     },
                     {"component": "VTextField", "props": {"variant": "outlined", "model": "custom_llm_api_protocol", "label": "API 协议（如 openai、claude）", "hint": "留空则自动推断", "persistent-hint": True}},
-                    {"component": "VBtn", "props": {"color": "primary", "variant": "elevated", "class": "mt-4", "text": "测试大模型连接", "events": {"click": {"api": f"plugin/AIPair/test_llm?apikey={settings.API_TOKEN}", "method": "POST"}}}},
+                    {
+                        "component": "VBtn",
+                        "props": {"color": "primary", "variant": "elevated", "class": "mt-4"},
+                        "text": "测试大模型连接",
+                        "events": {"click": {"api": f"plugin/AIPair/test_llm?apikey={settings.API_TOKEN}", "method": "POST"}},
+                    },
                 ],
             }
         ]
