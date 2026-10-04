@@ -75,7 +75,7 @@ class AIPair(_PluginBase):
     plugin_name = "AI双引擎识别"
     plugin_desc = "整合 AI 识别增强与 AI 识别词：原生识别失败时做结构化兜底（救当次），成功后沉淀窄作用域识别词（救以后）。识别词写入走全量快照比对、只增不删、写后逐行校验，杜绝清空用户识别词。致谢 liuyuexi1987 的开源识别增强实现。"
     plugin_icon = "mdi-robot-outline"
-    plugin_version = "1.0.10"
+    plugin_version = "1.0.15"
     plugin_label = "识别,增强"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "aipair_"
@@ -102,13 +102,6 @@ class AIPair(_PluginBase):
     _max_rule_length: int = 200
     _review_mode: bool = False
     _notify_on_write: bool = False
-    # 独立大模型配置（默认关闭，使用 MoviePilot 默认 AI）
-    _use_custom_llm: bool = False
-    _custom_llm_provider: str = ""
-    _custom_llm_api_key: str = ""
-    _custom_llm_base_url: str = ""
-    _custom_llm_model: str = ""
-    _custom_llm_api_protocol: str = ""
 
     # 识别词写入锁（本插件是唯一写入方，单锁足够）
     _identifier_lock = threading.Lock()
@@ -142,12 +135,6 @@ class AIPair(_PluginBase):
         self._max_rule_length = int(config.get("max_rule_length") or 200)
         self._review_mode = bool(config.get("review_mode", False))
         self._notify_on_write = bool(config.get("notify_on_write", False))
-        self._use_custom_llm = bool(config.get("use_custom_llm", False))
-        self._custom_llm_provider = str(config.get("custom_llm_provider") or "")
-        self._custom_llm_api_key = str(config.get("custom_llm_api_key") or "")
-        self._custom_llm_base_url = str(config.get("custom_llm_base_url") or "")
-        self._custom_llm_model = str(config.get("custom_llm_model") or "")
-        self._custom_llm_api_protocol = str(config.get("custom_llm_api_protocol") or "")
         self._systemconfig = SystemConfigOper()
         self._load_cooldown_records()
         self._load_settled_titles()
@@ -363,20 +350,7 @@ class AIPair(_PluginBase):
         return value
 
     def _get_llm(self):
-        """获取 LLM 实例。若启用独立大模型则传入自定义配置，否则用 MP 默认。"""
-        if self._use_custom_llm:
-            kwargs = {"streaming": False}
-            if self._custom_llm_provider:
-                kwargs["provider"] = self._custom_llm_provider
-            if self._custom_llm_model:
-                kwargs["model"] = self._custom_llm_model
-            if self._custom_llm_api_key:
-                kwargs["api_key"] = self._custom_llm_api_key
-            if self._custom_llm_base_url:
-                kwargs["base_url"] = self._custom_llm_base_url
-            if self._custom_llm_api_protocol:
-                kwargs["api_protocol"] = self._custom_llm_api_protocol
-            return self._run_async_compatible(LLMHelper.get_llm(**kwargs))
+        """获取 LLM 实例，固定复用 MoviePilot 默认 AI 配置。"""
         return self._run_async_compatible(LLMHelper.get_llm(streaming=False))
 
     @staticmethod
@@ -434,12 +408,6 @@ class AIPair(_PluginBase):
                 "max_rule_length": self._max_rule_length,
                 "review_mode": self._review_mode,
                 "notify_on_write": self._notify_on_write,
-                "use_custom_llm": self._use_custom_llm,
-                "custom_llm_provider": self._custom_llm_provider,
-                "custom_llm_api_key": self._custom_llm_api_key,
-                "custom_llm_base_url": self._custom_llm_base_url,
-                "custom_llm_model": self._custom_llm_model,
-                "custom_llm_api_protocol": self._custom_llm_api_protocol,
             }
             config.update(overrides or {})
             self.update_config(config)
@@ -1491,8 +1459,11 @@ AI 识别增强结果：
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     def _record_failed_sample(self, payload: Dict[str, Any]) -> None:
-        """记录失败样本（去重 + 保留上限）。"""
+        """记录失败样本（去重 + 保留上限 + 垃圾样本跳过）。"""
         if not self._save_failed_samples:
+            return
+        # 垃圾样本（纯字幕/强乱码）不入库，避免污染失败样本
+        if self._is_trash_sample(str(payload.get("title") or ""), str(payload.get("path") or "")):
             return
         try:
             rows = self._read_failed_samples(limit=1000)
@@ -1737,7 +1708,11 @@ AI 识别增强结果：
         """记录放弃原因统计。"""
         try:
             stats = self.get_data("abandon_stats") or {}
-            stats[reason] = stats.get(reason, 0) + 1
+            # 截断过长的原因：只保留冒号前的短前缀，避免详情页渲染大量重复长文本
+            short = str(reason or "").strip()
+            if len(short) > 30:
+                short = short[:30]
+            stats[short] = stats.get(short, 0) + 1
             self.save_data("abandon_stats", stats)
         except Exception as exc:
             logger.error(f"[AI双引擎] 记录放弃原因失败: {exc}")
@@ -1979,33 +1954,7 @@ AI 识别增强结果：
                 "summary": "确认写入规则",
                 "auth": "bear",
             },
-            {
-                "path": "/test_llm",
-                "endpoint": self.api_test_llm,
-                "methods": ["POST"],
-                "summary": "测试当前大模型配置是否可用",
-            },
         ]
-
-    async def api_test_llm(self, request: Request):
-        """测试当前大模型配置是否可用（用一条简短提示词验证连通性）。"""
-        ok, message = self._check_api_access(request)
-        if not ok:
-            return {"success": False, "message": message}
-        try:
-            llm = self._get_llm()
-            from langchain_core.prompts import ChatPromptTemplate
-            prompt = ChatPromptTemplate.from_messages([("human", "请只回复两个字：正常")])
-            chain = prompt | llm
-            response = chain.invoke({}, config={"configurable": {"timeout": 20}})
-            reply = LLMHelper.extract_text_content(response.content, fallback_to_string=True) if hasattr(response, "content") else str(response)
-            result_msg = f"测试成功，模型返回：{str(reply)[:50]}"
-            self.save_data("last_llm_test", {"ok": True, "msg": result_msg})
-            return {"success": True, "message": result_msg, "data": {"llm_ready": True}}
-        except Exception as exc:
-            result_msg = f"测试失败：{exc}"
-            self.save_data("last_llm_test", {"ok": False, "msg": result_msg})
-            return {"success": False, "message": result_msg, "data": {"llm_ready": False}}
 
     async def api_health(self, request: Request):
         """检查插件运行状态。"""
@@ -2279,7 +2228,6 @@ AI 识别增强结果：
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         """返回插件配置表单与默认配置。"""
         failed_samples_count = len(self._read_failed_samples(limit=self._failed_sample_cap()))
-        last_test = self.get_data("last_llm_test") or {}
         form = [
             {
                 "component": "VForm",
@@ -2335,46 +2283,6 @@ AI 识别增强结果：
                     },
                     {"component": "VSwitch", "props": {"model": "review_mode", "label": "先审后写模式（规则进待确认队列，人工确认后写入）"}},
                     {"component": "VSwitch", "props": {"model": "notify_on_write", "label": "写入/兜底成功时发送通知"}},
-                    {"component": "VSwitch", "props": {"model": "use_custom_llm", "label": "启用独立大模型（关闭则使用 MoviePilot 默认 AI）"}},
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                                {"component": "VTextField", "props": {"variant": "outlined", "model": "custom_llm_provider", "label": "模型提供商（如 OpenAI、Claude）", "hint": "留空则自动推断", "persistent-hint": True}},
-                            ]},
-                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                                {"component": "VTextField", "props": {"variant": "outlined", "model": "custom_llm_model", "label": "模型名称", "hint": "如 gpt-4o、claude-3-opus", "persistent-hint": True}},
-                            ]},
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                                {"component": "VTextField", "props": {"variant": "outlined", "model": "custom_llm_api_key", "label": "API Key", "type": "password", "hint": "服务端鉴权后不回显", "persistent-hint": True}},
-                            ]},
-                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                                {"component": "VTextField", "props": {"variant": "outlined", "model": "custom_llm_base_url", "label": "Base URL", "hint": "自定义接口地址，留空用默认", "persistent-hint": True}},
-                            ]},
-                        ],
-                    },
-                    {"component": "VTextField", "props": {"variant": "outlined", "model": "custom_llm_api_protocol", "label": "API 协议（如 openai、claude）", "hint": "留空则自动推断", "persistent-hint": True}},
-                    {
-                        "component": "VBtn",
-                        "props": {"color": "primary", "variant": "elevated", "class": "mt-4"},
-                        "text": "测试大模型连接",
-                        "events": {"click": {"api": f"plugin/AIPair/test_llm?apikey={settings.API_TOKEN}", "method": "POST"}},
-                    },
-                    *([
-                        {
-                            "component": "VAlert",
-                            "props": {
-                                "type": "success" if last_test.get("ok") else "error",
-                                "variant": "tonal", "class": "mt-2",
-                                "text": str(last_test.get("msg") or ""),
-                            },
-                        }
-                    ] if last_test else []),
                 ],
             }
         ]
@@ -2396,11 +2304,5 @@ AI 识别增强结果：
             "max_rule_length": 200,
             "review_mode": False,
             "notify_on_write": False,
-            "use_custom_llm": False,
-            "custom_llm_provider": "",
-            "custom_llm_api_key": "",
-            "custom_llm_base_url": "",
-            "custom_llm_model": "",
-            "custom_llm_api_protocol": "",
         }
         return form, defaults
