@@ -74,8 +74,8 @@ class AIPair(_PluginBase):
 
     plugin_name = "AI双引擎识别"
     plugin_desc = "整合 AI 识别增强与 AI 识别词：原生识别失败时做结构化兜底（救当次），成功后沉淀窄作用域识别词（救以后）。识别词写入走全量快照比对、只增不删、写后逐行校验，杜绝清空用户识别词。致谢 liuyuexi1987 的开源识别增强实现。"
-    plugin_icon = "mdi-robot-outline"
-    plugin_version = "1.0.15"
+    plugin_icon = "mdi-robot-happy-outline"
+    plugin_version = "1.0.17"
     plugin_label = "识别,增强"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "aipair_"
@@ -94,12 +94,13 @@ class AIPair(_PluginBase):
     _max_failed_samples: int = 200
     _auto_remove_applied_sample: bool = True
     _clear_failed_samples_once: bool = False
+    _active_path: str = "/media/downloads"
     # 识别词部分（唯一写入方）
     _write_identifier: bool = True
-    _write_min_confidence: float = 0.8
+    _write_min_confidence: float = 0.7
     _cooldown_hours: int = 24
-    _max_rule_lines: int = 5
-    _max_rule_length: int = 200
+    _max_rule_lines: int = 10
+    _max_rule_length: int = 350
     _review_mode: bool = False
     _notify_on_write: bool = False
 
@@ -107,8 +108,8 @@ class AIPair(_PluginBase):
     _identifier_lock = threading.Lock()
     # 冷却记录：文件名+规则 -> 上次处理时间戳
     _cooldown_records: Dict[str, float] = {}
-    # 已成功沉淀识别词的标题键（title|year|season），用于同名去重跳过重复 LLM 生成
-    _settled_titles: set = set()
+    # 已成功沉淀识别词的标题键（title|year|season -> timestamp），用于同名去重，30 天过期
+    _settled_titles: Dict[str, float] = {}
     # LLM 调用审计计数（_recognize 兜底 / _invoke_identifier_llm 沉淀），监控 token 消耗去向
     _llm_usage: Dict[str, int] = {}
     # 插件归属标记前缀，必须作为独立注释行写入，禁止拼接在规则行上
@@ -128,11 +129,12 @@ class AIPair(_PluginBase):
         self._max_failed_samples = max(20, min(1000, self._safe_int(config.get("max_failed_samples"), 200)))
         self._auto_remove_applied_sample = bool(config.get("auto_remove_applied_sample", True))
         self._clear_failed_samples_once = bool(config.get("clear_failed_samples_once", False))
+        self._active_path = str(config.get("active_path", "/media/downloads")).strip() or "/media/downloads"
         self._write_identifier = bool(config.get("write_identifier", True))
-        self._write_min_confidence = self._safe_float(config.get("write_min_confidence"), 0.8)
+        self._write_min_confidence = self._safe_float(config.get("write_min_confidence"), 0.7)
         self._cooldown_hours = int(config.get("cooldown_hours") or 24)
-        self._max_rule_lines = int(config.get("max_rule_lines") or 5)
-        self._max_rule_length = int(config.get("max_rule_length") or 200)
+        self._max_rule_lines = int(config.get("max_rule_lines") or 10)
+        self._max_rule_length = int(config.get("max_rule_length") or 350)
         self._review_mode = bool(config.get("review_mode", False))
         self._notify_on_write = bool(config.get("notify_on_write", False))
         self._systemconfig = SystemConfigOper()
@@ -441,6 +443,9 @@ class AIPair(_PluginBase):
         title, path = self._extract_title_path(event_data)
         if not title and not path:
             return
+        # 路径过滤：只处理指定目录下的资源（如 /media/downloads），避免订阅/历史/媒体库扫描触发
+        if path and self._active_path and not path.startswith(self._active_path):
+            return
         # 异步执行，不阻塞原生链路
         threading.Thread(
             target=self._handle_recognition_failure,
@@ -479,8 +484,9 @@ class AIPair(_PluginBase):
             self._inject_guess(event_data, guess)
 
             # 4. 沉淀识别词（救以后）
+            settle_result = {}
             if self._write_identifier:
-                self._settle_identifier(title, path, guess, verified)
+                settle_result = self._settle_identifier(title, path, guess, verified)
 
             # 5. 重新触发整理（带回识别结果的完整整理）
             transfer_success = self._retrigger_transfer(path, verified, guess)
@@ -493,7 +499,7 @@ class AIPair(_PluginBase):
 
             # 7. 通知
             if self._notify_on_write:
-                self._notify_result(title, path, guess, transfer_success)
+                self._notify_result(title, path, guess, transfer_success, settle_result)
 
         except Exception as exc:
             logger.error(f"[AI双引擎] 处理识别失败时发生异常: {exc}", exc_info=True)
@@ -514,8 +520,9 @@ class AIPair(_PluginBase):
         event_data["confidence"] = guess.get("confidence", 0)
         event_data["reason"] = guess.get("reason", "")
 
-    def _settle_identifier(self, title: str, path: str, guess: Dict[str, Any], verified: Dict[str, Any]) -> None:
-        """兜底成功后沉淀识别词规则。"""
+    def _settle_identifier(self, title: str, path: str, guess: Dict[str, Any], verified: Dict[str, Any]) -> Dict[str, Any]:
+        """兜底成功后沉淀识别词规则，返回沉淀结果。"""
+        result = {"written": False, "rule": ""}
         try:
             # A. 同名去重：同一标题键已沉淀过识别词，直接跳过，不重复调 LLM 生成
             settle_key = self._settle_key(verified, guess)
@@ -523,7 +530,7 @@ class AIPair(_PluginBase):
                 if self._debug:
                     logger.info(f"[AI双引擎] 标题已沉淀过识别词，跳过: {settle_key}")
                 self._record_abandon("已沉淀过")
-                return
+                return result
             suggested = self._suggest_identifiers({
                 "title": title, "path": path,
                 "desired_name": verified.get("title") or guess.get("name"),
@@ -537,7 +544,7 @@ class AIPair(_PluginBase):
             if not suggested.get("success"):
                 if self._debug:
                     logger.info(f"[AI双引擎] 识别词建议生成失败: {suggested.get('message')}")
-                return
+                return result
             data = suggested.get("data") or {}
             target = data.get("target") or {}
             ok, reason = self._target_ok(target)
@@ -545,7 +552,7 @@ class AIPair(_PluginBase):
                 self._record_abandon(f"目标不明确:{reason}")
                 if self._debug:
                     logger.info(f"[AI双引擎] 目标不明确，跳过沉淀: {reason}")
-                return
+                return result
             candidates = [item for item in (data.get("suggestions") or []) if item.get("lines")]
             # 同义规则语义去重：只差分辨率/发布组等噪音的规则只保留置信度最高的一条
             candidates = self._dedup_candidates_by_semantics(candidates)
@@ -554,20 +561,20 @@ class AIPair(_PluginBase):
             chosen = (strong or candidates)[0] if (strong or candidates) else None
             if not chosen:
                 self._record_abandon("无可用规则")
-                return
+                return result
 
             # 宽泛规则拒绝防线：过宽规则直接放弃，不进入沉淀/待确认
             if self._is_rule_too_broad(chosen.get("rule") or "", target):
                 self._record_abandon("规则过宽")
                 if self._debug:
                     logger.info(f"[AI双引擎] 规则作用域过宽，已拒绝沉淀: {chosen.get('rule')}")
-                return
+                return result
 
             # 先审后写模式：进待确认队列，不直接写入
             if self._review_mode:
                 self._add_pending_rules(title, path, chosen, target)
                 self._record_abandon("待确认")
-                return
+                return result
 
             # 写入（统一模板：分组头 + 作品标记 + 带 tmdbid 后缀的规则行）
             block_lines = self._build_identifier_block(chosen, target)
@@ -577,7 +584,7 @@ class AIPair(_PluginBase):
                 self._record_abandon("规则已存在")
                 if self._debug:
                     logger.info(f"[AI双引擎] 规则已存在或重复，未写入: {chosen.get('rule')}")
-                return
+                return result
 
             # 写后回放验证，不命中自动回滚
             verify = self._preview_current_identifiers(title=title, target=target)
@@ -585,8 +592,10 @@ class AIPair(_PluginBase):
                 rolled = self._remove_custom_identifiers(added)
                 self._record_abandon("回放失败已回滚")
                 logger.warning(f"[AI双引擎] 写入后回放未命中目标，已回滚 {rolled.get('removed_count', 0)} 行: {chosen.get('rule')}")
-                return
+                return result
 
+            result["written"] = True
+            result["rule"] = chosen.get("rule") or ""
             if self._notify_on_write:
                 self._notify_identifier_written(title, chosen, target, apply_result.get("total_count"))
             # 标记已沉淀，避免后续同名重复调 LLM
@@ -597,24 +606,24 @@ class AIPair(_PluginBase):
         except Exception as exc:
             logger.warning(f"[AI双引擎] 沉淀识别词异常: {exc}")
             self._record_abandon("沉淀异常")
+        return result
 
     @staticmethod
     def _target_ok(target: Dict[str, Any]) -> Tuple[bool, str]:
-        """目标必须足够明确才允许写入识别词。"""
+        """目标必须足够明确才允许写入识别词。
+
+        2026-10-04 调整：去掉年份、季号、集号的强制要求。
+        只要能确认「标题 + TMDB ID + 类型」，就足够写入识别词——
+        识别词只需要把旧文件名绑定到正确作品，不需要绑定具体季集。
+        """
         target = target or {}
         if not str(target.get("name") or "").strip():
             return False, "缺少标题"
-        if not str(target.get("year") or "").strip():
-            return False, "缺少年份"
         media_type = AIPair._normalize_media_type(target.get("media_type"))
         if media_type == "unknown":
             return False, "类型不明"
         if not AIPair._safe_int(target.get("tmdb_id"), 0):
             return False, "缺少 TMDB ID"
-        if media_type == "tv" and not AIPair._safe_int(target.get("season"), 0):
-            return False, "剧集缺少季号"
-        if media_type == "tv" and not AIPair._safe_int(target.get("episode"), 0):
-            return False, "剧集缺少集号"
         return True, ""
 
     # ==================== AI 兜底识别 ====================
@@ -1459,7 +1468,11 @@ AI 识别增强结果：
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     def _record_failed_sample(self, payload: Dict[str, Any]) -> None:
-        """记录失败样本（去重 + 保留上限 + 垃圾样本跳过）。"""
+        """记录失败样本（去重 + 保留上限 + 垃圾样本跳过）。
+        
+        2026-10-04 调整：达到上限后停止保存新样本（旧的丢弃新的），避免噪音样本无限累积。
+        识别词本身没有上限，会持续积累。
+        """
         if not self._save_failed_samples:
             return
         # 垃圾样本（纯字幕/强乱码）不入库，避免污染失败样本
@@ -1470,6 +1483,11 @@ AI 识别增强结果：
             rows.reverse()
             identity = self._sample_identity(payload)
             filtered = [row for row in rows if self._sample_identity(row) != identity]
+            # 达到上限后停止保存新样本，丢弃最旧的
+            if len(filtered) >= self._failed_sample_cap():
+                if self._debug:
+                    logger.info(f"[AI双引擎] 失败样本已达上限 {self._failed_sample_cap()}，跳过新样本")
+                return
             filtered.append(payload)
             self._write_failed_samples(filtered)
         except Exception as exc:
@@ -1641,36 +1659,47 @@ AI 识别增强结果：
         return key
 
     def _is_settled(self, key: str) -> bool:
-        """判断该标题键是否已沉淀过识别词。"""
+        """判断该标题键是否已沉淀过识别词（30 天过期后允许重新评估）。"""
         if not key:
             return False
         try:
-            return key in self._settled_titles
+            record = self._settled_titles.get(key) if isinstance(self._settled_titles, dict) else None
+            if record is None:
+                return False
+            if isinstance(record, (int, float)):
+                # 旧格式兼容：纯时间戳或纯标记
+                return (time.time() - float(record)) < 30 * 86400
+            return (time.time() - float(record or 0)) < 30 * 86400
         except Exception:
             return False
 
     def _mark_settled(self, key: str) -> None:
-        """标记该标题键已沉淀并发起持久化。"""
+        """标记该标题键已沉淀并发起持久化（记录时间戳，30 天后过期）。"""
         if not key:
             return
-        self._settled_titles.add(key)
+        if not isinstance(self._settled_titles, dict):
+            self._settled_titles = {}
+        self._settled_titles[key] = time.time()
         self._save_settled_titles()
 
     def _load_settled_titles(self) -> None:
-        """加载已沉淀标题集合。"""
+        """加载已沉淀标题集合（支持字典格式 key->timestamp，兼容旧列表格式）。"""
         try:
             data = self.get_data("settled_titles")
-            if data and isinstance(data, (list, set, tuple)):
-                self._settled_titles = set(str(x) for x in data)
+            if isinstance(data, dict):
+                self._settled_titles = data
+            elif isinstance(data, (list, set, tuple)):
+                # 旧格式：纯标题集合，无时间戳，视为已过期允许重新评估
+                self._settled_titles = {}
             else:
-                self._settled_titles = set()
+                self._settled_titles = {}
         except Exception:
-            self._settled_titles = set()
+            self._settled_titles = {}
 
     def _save_settled_titles(self) -> None:
         """保存已沉淀标题集合。"""
         try:
-            self.save_data("settled_titles", sorted(self._settled_titles))
+            self.save_data("settled_titles", dict(self._settled_titles))
         except Exception as exc:
             logger.warning(f"[AI双引擎] 保存已沉淀标题集合失败: {exc}")
 
@@ -1764,27 +1793,54 @@ AI 识别增强结果：
     def _notify_identifier_written(self, title: str, chosen: Dict[str, Any], target: Dict[str, Any], total: int) -> None:
         """发送识别词写入通知。"""
         try:
+            rule = chosen.get("rule") or ""
+            if len(rule) > 100:
+                rule = rule[:100] + "..."
+            old_name = title[:50] + "..." if len(title) > 50 else title
+            new_name = target.get("name") or "未知"
+            year = target.get("year") or ""
+            full_target = f"{new_name}（{year}）" if year else new_name
             self.post_message(
-                title="AI双引擎：识别词已沉淀",
+                title="AI双引擎识别",
                 text=(
-                    f"标题：{title}\n"
-                    f"规则：{chosen.get('rule')}\n"
-                    f"目标：{target.get('name')}（{target.get('year')}）\n"
-                    f"当前识别词总数：{total}"
+                    f"📌 资源：{old_name}\n"
+                    f"🎯 绑定至：{full_target}\n"
+                    f"📝 新增规则：{rule}\n"
+                    f"📊 识别词总数：{total}"
                 ),
             )
         except Exception as exc:
             logger.warning(f"[AI双引擎] 发送通知失败: {exc}")
 
-    def _notify_result(self, title: str, path: str, guess: Dict[str, Any], transfer_success: bool) -> None:
-        """发送兜底识别结果通知。"""
+    def _notify_result(self, title: str, path: str, guess: Dict[str, Any], transfer_success: bool, settle_result: Optional[Dict[str, Any]] = None) -> None:
+        """发送兜底识别结果通知（含识别词状态）。"""
         try:
+            conf = guess.get("confidence", 0)
+            if isinstance(conf, float):
+                conf = f"{conf:.0%}"
+            old_name = title[:50] + "..." if len(title) > 50 else title
+            new_name = guess.get("name") or "未知"
+            year = guess.get("year") or ""
+            full_new = f"{new_name}（{year}）" if year else new_name
+
+            # 识别词状态
+            settle_line = ""
+            if settle_result and settle_result.get("written"):
+                rule = settle_result.get("rule") or ""
+                if len(rule) > 80:
+                    rule = rule[:80] + "..."
+                settle_line = f"\n📝 识别词：已沉淀（{rule}）"
+            elif self._write_identifier:
+                settle_line = "\n📝 识别词：未写入（已有或不符合条件）"
+
             self.post_message(
-                title="AI双引擎：识别兜底完成",
+                title="AI双引擎识别",
                 text=(
-                    f"标题：{title}\n"
-                    f"识别结果：{guess.get('name')}（{guess.get('year')}）置信度 {guess.get('confidence')}\n"
-                    f"重新整理：{'成功' if transfer_success else '未执行或失败'}"
+                    f"📌 资源：{old_name}\n"
+                    f"🎯 识别为：{full_new}\n"
+                    f"✨ 置信度：{conf}\n"
+                    f"{'✅ 整理成功' if transfer_success else '⚠️ 整理未触发（文件已存在或路径无效）'}"
+                    f"{settle_line}"
                 ),
             )
         except Exception as exc:
@@ -2162,51 +2218,145 @@ AI 识别增强结果：
                             "text": "原生识别失败时：AI 结构化兜底（救当次）→ 沉淀窄作用域识别词（救以后）→ 重新整理。识别词由本插件独占写入，写前全量快照比对、只增不删、写后逐行校验。",
                         },
                     },
+                    # 第一行：核心状态（3 个关键指标）
                     {
                         "component": "VRow",
-                        "props": {"dense": True, "class": "mb-2"},
+                        "props": {"dense": True, "class": "mb-3"},
                         "content": [
-                            {"component": "VCol", "props": {"cols": 12, "sm": 6, "md": 2}, "content": [stat_card("当前状态", "已启用" if self._enabled else "未启用")]},
-                            {"component": "VCol", "props": {"cols": 12, "sm": 6, "md": 3}, "content": [stat_card("LLM 可用", "是" if llm_ready else "否", f"{llm_provider} / {llm_model}")]},
-                            {"component": "VCol", "props": {"cols": 12, "sm": 6, "md": 2}, "content": [stat_card("失败样本", f"{failed_samples_count} 条", f"上限 {self._max_failed_samples} 条")]},
-                            {"component": "VCol", "props": {"cols": 12, "sm": 6, "md": 2}, "content": [stat_card("LLM 错误", f"{llm_errors_count} 条", "诊断记录")]},
-                            {"component": "VCol", "props": {"cols": 12, "sm": 6, "md": 3}, "content": [stat_card("自定义识别词", f"{custom_identifiers_count} 条", f"AI 沉淀 {ai_rules_count} 条")]},
+                            {"component": "VCol", "props": {"cols": 12, "sm": 4}, "content": [{
+                                "component": "VCard",
+                                "props": {"variant": "tonal", "color": "success" if self._enabled else "grey", "class": "pa-4 h-100"},
+                                "content": [
+                                    {"component": "div", "props": {"class": "text-caption text-medium-emphasis mb-1"}, "text": "插件状态"},
+                                    {"component": "div", "props": {"class": "text-h5 font-weight-bold"}, "text": "✅ 已启用" if self._enabled else "⏸️ 未启用"},
+                                ],
+                            }]},
+                            {"component": "VCol", "props": {"cols": 12, "sm": 4}, "content": [{
+                                "component": "VCard",
+                                "props": {"variant": "tonal", "color": "primary", "class": "pa-4 h-100"},
+                                "content": [
+                                    {"component": "div", "props": {"class": "text-caption text-medium-emphasis mb-1"}, "text": "AI 沉淀识别词"},
+                                    {"component": "div", "props": {"class": "text-h5 font-weight-bold"}, "text": f"{ai_rules_count} 条"},
+                                    {"component": "div", "props": {"class": "text-caption text-medium-emphasis mt-1"}, "text": f"总识别词 {custom_identifiers_count} 条"},
+                                ],
+                            }]},
+                            {"component": "VCol", "props": {"cols": 12, "sm": 4}, "content": [{
+                                "component": "VCard",
+                                "props": {"variant": "tonal", "color": "warning" if failed_samples_count > 50 else "info", "class": "pa-4 h-100"},
+                                "content": [
+                                    {"component": "div", "props": {"class": "text-caption text-medium-emphasis mb-1"}, "text": "失败样本"},
+                                    {"component": "div", "props": {"class": "text-h5 font-weight-bold"}, "text": f"{failed_samples_count} 条"},
+                                    {"component": "div", "props": {"class": "text-caption text-medium-emphasis mt-1"}, "text": f"上限 {self._max_failed_samples} 条"},
+                                ],
+                            }]},
                         ],
                     },
+                    # 第二行：LLM 状态（带进度条）
+                    {
+                        "component": "VRow",
+                        "props": {"dense": True, "class": "mb-3"},
+                        "content": [
+                            {"component": "VCol", "props": {"cols": 12, "sm": 6}, "content": [{
+                                "component": "VCard",
+                                "props": {"variant": "tonal", "class": "pa-4 h-100"},
+                                "content": [
+                                    {"component": "div", "props": {"class": "text-caption text-medium-emphasis mb-1"}, "text": "大模型状态"},
+                                    {"component": "div", "props": {"class": "text-body-1 font-weight-bold"}, "text": f"{llm_provider} / {llm_model}"},
+                                    {
+                                        "component": "VProgressLinear",
+                                        "props": {"model": 100 if llm_ready else 0, "color": "success" if llm_ready else "error", "height": "6", "class": "mt-2"},
+                                    },
+                                    {"component": "div", "props": {"class": "text-caption mt-1"}, "text": "✅ 可用" if llm_ready else "❌ 不可用"},
+                                ],
+                            }]},
+                            {"component": "VCol", "props": {"cols": 12, "sm": 6}, "content": [{
+                                "component": "VCard",
+                                "props": {"variant": "tonal", "class": "pa-4 h-100"},
+                                "content": [
+                                    {"component": "div", "props": {"class": "text-caption text-medium-emphasis mb-1"}, "text": "失败样本使用率"},
+                                    {
+                                        "component": "VProgressLinear",
+                                        "props": {"model": min(100, int(failed_samples_count / max(1, self._max_failed_samples) * 100)), "color": "warning" if failed_samples_count > self._max_failed_samples * 0.8 else "info", "height": "6", "class": "mt-2"},
+                                    },
+                                    {"component": "div", "props": {"class": "text-caption mt-1"}, "text": f"{failed_samples_count} / {self._max_failed_samples} 条"},
+                                ],
+                            }]},
+                        ],
+                    },
+                    # 第三行：配置状态
                     {
                         "component": "VRow",
                         "props": {"dense": True, "class": "mb-2"},
                         "content": [
-                            {"component": "VCol", "props": {"cols": 12, "sm": 6, "md": 2}, "content": [stat_card("写识别词", "开" if self._write_identifier else "关", f"阈值 {self._write_min_confidence}")]},
-                            {"component": "VCol", "props": {"cols": 12, "sm": 6, "md": 2}, "content": [stat_card("先审后写", "开" if self._review_mode else "关")]},
-                            {"component": "VCol", "props": {"cols": 12, "sm": 6, "md": 2}, "content": [stat_card("冷却时长", f"{self._cooldown_hours} 小时")]},
-                            {"component": "VCol", "props": {"cols": 12, "sm": 6, "md": 2}, "content": [stat_card("冷却记录", f"{cooldown_count} 条")]},
+                            {"component": "VCol", "props": {"cols": 12, "sm": 3}, "content": [{
+                                "component": "VCard",
+                                "props": {"variant": "tonal", "class": "pa-3"},
+                                "content": [
+                                    {"component": "div", "props": {"class": "text-caption text-medium-emphasis"}, "text": "写识别词"},
+                                    {"component": "div", "props": {"class": "text-body-1 font-weight-bold"}, "text": f"{'开' if self._write_identifier else '关'}（阈值 {self._write_min_confidence}）"},
+                                ],
+                            }]},
+                            {"component": "VCol", "props": {"cols": 12, "sm": 3}, "content": [{
+                                "component": "VCard",
+                                "props": {"variant": "tonal", "class": "pa-3"},
+                                "content": [
+                                    {"component": "div", "props": {"class": "text-caption text-medium-emphasis"}, "text": "先审后写"},
+                                    {"component": "div", "props": {"class": "text-body-1 font-weight-bold"}, "text": "开" if self._review_mode else "关"},
+                                ],
+                            }]},
+                            {"component": "VCol", "props": {"cols": 12, "sm": 3}, "content": [{
+                                "component": "VCard",
+                                "props": {"variant": "tonal", "class": "pa-3"},
+                                "content": [
+                                    {"component": "div", "props": {"class": "text-caption text-medium-emphasis"}, "text": "冷却时长"},
+                                    {"component": "div", "props": {"class": "text-body-1 font-weight-bold"}, "text": f"{self._cooldown_hours} 小时"},
+                                ],
+                            }]},
+                            {"component": "VCol", "props": {"cols": 12, "sm": 3}, "content": [{
+                                "component": "VCard",
+                                "props": {"variant": "tonal", "class": "pa-3"},
+                                "content": [
+                                    {"component": "div", "props": {"class": "text-caption text-medium-emphasis"}, "text": "冷却记录"},
+                                    {"component": "div", "props": {"class": "text-body-1 font-weight-bold"}, "text": f"{cooldown_count} 条"},
+                                ],
+                            }]},
                         ],
                     },
                 ],
             }
         ]
 
-        # 放弃原因统计
+        # 放弃原因统计（带条形图效果）
         abandon_stats = stats.get("abandon_stats", {})
         if abandon_stats:
+            max_count = max(abandon_stats.values()) if abandon_stats else 1
+            top_stats = sorted(abandon_stats.items(), key=lambda x: -x[1])[:5]
             stat_cards = []
-            for reason, count in abandon_stats.items():
+            for reason, count in top_stats:
+                pct = int(count / max(1, max_count) * 100)
                 stat_cards.append({
                     "component": "VCard",
-                    "props": {"class": "ma-2", "style": "min-width: 120px;"},
+                    "props": {"variant": "tonal", "class": "ma-2", "style": "min-width: 140px;"},
                     "content": [{
                         "component": "VCardText",
                         "props": {"class": "text-center"},
                         "content": [
-                            {"component": "div", "props": {"class": "text-h4"}, "text": str(count)},
-                            {"component": "div", "props": {"class": "text-caption"}, "text": reason},
+                            {"component": "div", "props": {"class": "text-h4 font-weight-bold"}, "text": str(count)},
+                            {"component": "div", "props": {"class": "text-caption text-medium-emphasis mb-2"}, "text": reason},
+                            {
+                                "component": "VProgressLinear",
+                                "props": {"model": pct, "color": "primary", "height": "4"},
+                            },
                         ],
                     }],
                 })
             page[0]["content"].append({
-                "component": "VRow",
-                "content": [{"component": "VCol", "props": {"cols": 12}, "content": stat_cards}],
+                "component": "VCard",
+                "props": {"variant": "tonal", "class": "mb-4 pa-2"},
+                "content": [
+                    {"component": "div", "props": {"class": "text-subtitle-2 pa-2"}, "text": "放弃原因统计（Top 5）"},
+                    {"component": "VRow", "content": [{"component": "VCol", "props": {"cols": 12}, "content": stat_cards}]},
+                ],
             })
 
         # 待确认规则
@@ -2247,7 +2397,6 @@ AI 识别增强结果：
                         },
                     },
                     {"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件"}},
-                    {"component": "VSwitch", "props": {"model": "debug", "label": "调试模式（写入详细日志）"}},
                     {
                         "component": "VRow",
                         "content": [
@@ -2255,34 +2404,61 @@ AI 识别增强结果：
                                 {"component": "VTextField", "props": {"variant": "outlined", "model": "confidence_threshold", "label": "兜底注入置信度阈值", "density": "comfortable", "type": "number", "hint": "低于此值不注入", "persistent-hint": True}},
                             ]},
                             {"component": "VCol", "props": {"cols": 12, "sm": 6}, "content": [
-                                {"component": "VTextField", "props": {"variant": "outlined", "model": "request_timeout", "label": "LLM 请求超时（秒）", "density": "comfortable", "type": "number", "hint": "默认 25 秒", "persistent-hint": True}},
-                            ]},
-                            {"component": "VCol", "props": {"cols": 12}, "content": [
-                                {"component": "VTextField", "props": {"variant": "outlined", "model": "max_retries", "label": "结构化输出重试次数", "density": "comfortable", "type": "number", "hint": "默认 2 次", "persistent-hint": True, "style": "margin-bottom: 12px; margin-top: 8px"}},
+                                {"component": "VTextField", "props": {"variant": "outlined", "model": "active_path", "label": "生效目录路径", "hint": "只处理此目录下的资源，留空则处理所有", "persistent-hint": True, "placeholder": "/media/downloads"}},
                             ]},
                         ],
                     },
-                    {"component": "VTextField", "props": {"variant": "outlined", "model": "max_failed_samples", "label": "失败样本保留上限", "type": "number", "hint": "默认保留最近 200 条，并对重复样本自动去重", "persistent-hint": True}},
-                    {"component": "VSwitch", "props": {"model": "save_failed_samples", "label": "保存低置信度样本"}},
-                    {"component": "VSwitch", "props": {"model": "save_title_only_samples", "label": "保存仅标题样本"}},
-                    {"component": "VSwitch", "props": {"model": "auto_remove_applied_sample", "label": "写入识别词后自动移除对应失败样本"}},
-                    {"component": "VSwitch", "props": {"model": "clear_failed_samples_once", "label": "保存时清空失败样本（一次性）"}},
                     {"component": "VSwitch", "props": {"model": "write_identifier", "label": "兜底成功后自动沉淀识别词（推荐开启，同类文件以后原生即可识别）"}},
                     {"component": "VSlider", "props": {"model": "write_min_confidence", "label": "识别词沉淀置信度阈值（低于此值不写入）", "min": 0.3, "max": 1.0, "step": 0.05, "thumb-label": "always"}},
-                    {"component": "VTextField", "props": {"variant": "outlined", "model": "cooldown_hours", "label": "冷却时长（小时）", "density": "comfortable", "hint": "同一文件名在此时间内只处理一次", "persistent-hint": True, "style": "margin-bottom: 12px; margin-top: 8px", "type": "number"}},
+                    {"component": "VSwitch", "props": {"model": "notify_on_write", "label": "发送通知"}},
                     {
-                        "component": "VRow",
+                        "component": "VExpansionPanels",
+                        "props": {"class": "mt-4"},
                         "content": [
-                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                                {"component": "VTextField", "props": {"variant": "outlined", "model": "max_rule_lines", "label": "单次写入规则行数上限", "type": "number", "hint": "防止批量写入污染识别词库", "persistent-hint": True}},
-                            ]},
-                            {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
-                                {"component": "VTextField", "props": {"variant": "outlined", "model": "max_rule_length", "label": "单条规则长度上限（字符）", "type": "number", "hint": "超长规则直接放弃", "persistent-hint": True}},
-                            ]},
+                            {
+                                "component": "VExpansionPanel",
+                                "props": {"title": "⚙️ 高级设置", "bg-color": "blue-grey darken-1", "elevation": "2", "style": "--v-expansion-panel-title-color: rgb(var(--v-theme-error));"},
+                                "content": [
+                                    {
+                                        "component": "VExpansionPanelText",
+                                        "content": [
+                                            {"component": "VSwitch", "props": {"model": "debug", "label": "调试模式（写入详细日志）"}},
+                                            {
+                                                "component": "VRow",
+                                                "content": [
+                                                    {"component": "VCol", "props": {"cols": 12, "sm": 6}, "content": [
+                                                        {"component": "VTextField", "props": {"variant": "outlined", "model": "request_timeout", "label": "LLM 请求超时（秒）", "density": "comfortable", "type": "number", "hint": "默认 25 秒", "persistent-hint": True}},
+                                                    ]},
+                                                    {"component": "VCol", "props": {"cols": 12, "sm": 6}, "content": [
+                                                        {"component": "VTextField", "props": {"variant": "outlined", "model": "max_retries", "label": "结构化输出重试次数", "density": "comfortable", "type": "number", "hint": "默认 2 次", "persistent-hint": True}},
+                                                    ]},
+                                                ],
+                                            },
+                                            {"component": "VTextField", "props": {"variant": "outlined", "model": "max_failed_samples", "label": "失败样本保留上限", "type": "number", "hint": "达到上限后停止保存新样本", "persistent-hint": True, "class": "mt-3"}},
+                                            {"component": "VSwitch", "props": {"model": "save_failed_samples", "label": "保存低置信度样本", "class": "mt-2"}},
+                                            {"component": "VSwitch", "props": {"model": "save_title_only_samples", "label": "保存仅标题样本"}},
+                                            {"component": "VSwitch", "props": {"model": "auto_remove_applied_sample", "label": "写入识别词后自动移除对应失败样本"}},
+                                            {"component": "VSwitch", "props": {"model": "clear_failed_samples_once", "label": "保存时清空失败样本（一次性）"}},
+                                            {"component": "VTextField", "props": {"variant": "outlined", "model": "cooldown_hours", "label": "冷却时长（小时）", "density": "comfortable", "hint": "同一文件名在此时间内只处理一次", "persistent-hint": True, "type": "number", "class": "mb-2"}},
+                                            {
+                                                "component": "VRow",
+                                                "props": {"class": "mt-2"},
+                                                "content": [
+                                                    {"component": "VCol", "props": {"cols": 12, "sm": 6}, "content": [
+                                                        {"component": "VTextField", "props": {"variant": "outlined", "model": "max_rule_lines", "label": "单次写入规则行数上限", "type": "number", "hint": "防止批量写入污染识别词库", "persistent-hint": True}},
+                                                    ]},
+                                                    {"component": "VCol", "props": {"cols": 12, "sm": 6}, "content": [
+                                                        {"component": "VTextField", "props": {"variant": "outlined", "model": "max_rule_length", "label": "单条规则长度上限（字符）", "type": "number", "hint": "超长规则直接放弃", "persistent-hint": True}},
+                                                    ]},
+                                                ],
+                                            },
+                                            {"component": "VSwitch", "props": {"model": "review_mode", "label": "先审后写模式（规则进待确认队列，人工确认后写入）"}},
+                                        ],
+                                    },
+                                ],
+                            },
                         ],
                     },
-                    {"component": "VSwitch", "props": {"model": "review_mode", "label": "先审后写模式（规则进待确认队列，人工确认后写入）"}},
-                    {"component": "VSwitch", "props": {"model": "notify_on_write", "label": "写入/兜底成功时发送通知"}},
                 ],
             }
         ]
@@ -2297,11 +2473,12 @@ AI 识别增强结果：
             "max_failed_samples": 200,
             "auto_remove_applied_sample": True,
             "clear_failed_samples_once": False,
+            "active_path": "/media/downloads",
             "write_identifier": True,
-            "write_min_confidence": 0.8,
+            "write_min_confidence": 0.7,
             "cooldown_hours": 24,
-            "max_rule_lines": 5,
-            "max_rule_length": 200,
+            "max_rule_lines": 10,
+            "max_rule_length": 350,
             "review_mode": False,
             "notify_on_write": False,
         }
