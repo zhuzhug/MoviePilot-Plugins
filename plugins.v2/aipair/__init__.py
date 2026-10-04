@@ -75,7 +75,7 @@ class AIPair(_PluginBase):
     plugin_name = "AI双引擎识别"
     plugin_desc = "整合 AI 识别增强与 AI 识别词：原生识别失败时做结构化兜底（救当次），成功后沉淀窄作用域识别词（救以后）。识别词写入走全量快照比对、只增不删、写后逐行校验，杜绝清空用户识别词。致谢 liuyuexi1987 的开源识别增强实现。"
     plugin_icon = "mdi-robot-happy-outline"
-    plugin_version = "1.0.18"
+    plugin_version = "1.0.20"
     plugin_label = "识别,增强"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "aipair_"
@@ -403,6 +403,7 @@ class AIPair(_PluginBase):
                 "max_failed_samples": self._max_failed_samples,
                 "auto_remove_applied_sample": self._auto_remove_applied_sample,
                 "clear_failed_samples_once": self._clear_failed_samples_once,
+                "active_path": self._active_path,
                 "write_identifier": self._write_identifier,
                 "write_min_confidence": self._write_min_confidence,
                 "cooldown_hours": self._cooldown_hours,
@@ -430,16 +431,17 @@ class AIPair(_PluginBase):
             logger.warning(f"[AI双引擎] 注册识别事件失败: {exc}")
 
     def on_chain_name_recognize(self, event) -> None:
-        """识别事件回调：只在原生识别失败时介入。"""
+        """识别事件回调：只在原生识别失败时介入。
+
+        2026-10-04 复核：事件数据只含 title/path 等原始字段，不含 mediainfo。
+        原生识别成功时不会触发此事件，只有失败时才会触发辅助识别。
+        """
         if not self._enabled:
             return
         event_data = getattr(event, "event_data", None) or {}
-        # 已有 mediainfo 或 source_plugin 说明识别成功或已被处理，跳过
-        if isinstance(event_data, dict):
-            if event_data.get("mediainfo") or event_data.get("media_info"):
-                return
-            if event_data.get("source_plugin"):
-                return
+        # 已被其他插件处理则跳过
+        if isinstance(event_data, dict) and event_data.get("source_plugin"):
+            return
         title, path = self._extract_title_path(event_data)
         if not title and not path:
             return
@@ -596,8 +598,6 @@ class AIPair(_PluginBase):
 
             result["written"] = True
             result["rule"] = chosen.get("rule") or ""
-            if self._notify_on_write:
-                self._notify_identifier_written(title, chosen, target, apply_result.get("total_count"))
             # 标记已沉淀，避免后续同名重复调 LLM
             self._mark_settled(settle_key)
             if self._debug:
@@ -1063,25 +1063,33 @@ AI 识别增强结果：
             bare = left.lower().strip()
             if not (re.fullmatch(anchor, bare) for anchor in format_anchors):
                 has_anchor = True
-        if not has_anchor:
-            return True  # 无任何结构化锚点 → 过宽
 
         left_lower = left.lower()
 
         # —— 第一道：匹配段足够具体（含较长语义 token）→ 直接视为窄作用域 ——
         # 排除纯数字、纯季集结构符、裸格式词形态的 token，它们不算"语义锚点"
+        # 长度按"视觉宽度"计：CJK（中日韩）字符算 2，拉丁字符算 1，避免日文假名短 token 被误判为过宽
         _concrete_re = re.compile(
             r"^\d{2,4}$|^s\d{1,2}e\d{1,2}$|^s\d{1,2}$|"
             r"^(?:1080p|720p|2160p|4k|uhd|bluray|blu-ray|web-dl|hdtv|webrip|"
             r"x264|x265|hevc|avc|remux|hdr|diy|strm|dmhy|chinese|chs|cht)$"
         )
+
+        def _visual_len(token: str) -> int:
+            """token 的视觉宽度：CJK 字符算 2，其余算 1。"""
+            return sum(2 if "\u4e00" <= ch <= "\u9fff" or "\u3040" <= ch <= "\u30ff" or "\uff00" <= ch <= "\uffef" else 1 for ch in token)
+
         long_tokens = [
             t for t in re.split(r"[\s._\-\[\]（）()【】]+", left_lower)
-            if len(t) >= (4 if re.fullmatch(r"[\u4e00-\u9fff]+", t) else 6)
+            if _visual_len(t) >= 6
             and not _concrete_re.match(t)
         ]
         if long_tokens:
             return False
+
+        # 无长语义 token 时，才要求有结构化锚点（季集/年份/格式词）
+        if not has_anchor:
+            return True  # 无任何结构化锚点 → 过宽
 
         # — 第二道：结构化锚点（季集 / 年份 / 格式词，且非孤立裸 token）——
         purged = left_lower.strip()
@@ -1160,6 +1168,8 @@ AI 识别增强结果：
             if target.get("episode"):
                 matched = matched and (preview["episode"] == target["episode"])
             preview["matched_target"] = matched
+        else:
+            preview["matched_target"] = True
         return preview
 
     def _preview_identifier_rule(self, title: str, rule: str, target: Dict[str, Any]) -> Dict[str, Any]:
@@ -1343,14 +1353,27 @@ AI 识别增强结果：
             return False
 
     def _cleanup_failed_history(self, path: str) -> None:
-        """整理成功后删除同源路径下的旧失败记录。"""
+        """整理成功后删除同源路径下的所有旧失败记录。
+
+        2026-10-04 修复：原来用 get_by_src 只取单条记录，若第一条是成功记录则失败记录残留。
+        改为直接查库遍历同路径的所有失败记录并逐条删除。
+        """
         try:
-            from app.db import TransferHistoryOper
-            transfer_oper = TransferHistoryOper()
-            records = transfer_oper.get_by_src(path, "local")
-            if records and not records.status:
-                transfer_oper.delete(records.id)
-                logger.info(f"[AI双引擎] 已删除旧失败记录: {path}")
+            from app.db import ScopedSession
+            from app.db.models.transferhistory import TransferHistory
+            with ScopedSession() as session:
+                records = (
+                    session.query(TransferHistory)
+                    .filter(TransferHistory.src == path, TransferHistory.status.is_(False))
+                    .all()
+                )
+                deleted = 0
+                for rec in records:
+                    session.delete(rec)
+                    deleted += 1
+                if deleted:
+                    session.commit()
+                    logger.info(f"[AI双引擎] 已删除 {deleted} 条旧失败记录: {path}")
         except Exception as exc:
             logger.error(f"[AI双引擎] 清理失败记录异常: {exc}")
 
@@ -1409,8 +1432,17 @@ AI 识别增强结果：
         return (time.time() - last_time) < cooldown_seconds
 
     def _update_cooldown(self, sample_key: str) -> None:
-        """更新冷却记录。"""
+        """更新冷却记录，并顺带清理过期记录（超过冷却期 2 倍）。"""
         self._cooldown_records[sample_key] = time.time()
+        # 清理过期记录，防止无限增长
+        try:
+            now = time.time()
+            expire_before = now - self._cooldown_hours * 3600 * 2
+            stale = [k for k, v in self._cooldown_records.items() if v < expire_before]
+            for k in stale:
+                self._cooldown_records.pop(k, None)
+        except Exception:
+            pass
         self._save_cooldown_records()
 
     def _load_cooldown_records(self) -> None:
@@ -1650,12 +1682,16 @@ AI 识别增强结果：
             logger.warning(f"[AI双引擎] 移除失败样本失败: {exc}")
 
     def _settle_key(self, verified: Dict[str, Any], guess: Dict[str, Any]) -> str:
-        """构造已沉淀标题的归一化键（标题|年份|季号）。"""
-        title = str((verified or {}).get("title") or (guess or {}).get("name") or "").strip()
-        year = str((verified or {}).get("year") or "").strip() or str((guess or {}).get("year") or "").strip()
+        """构造已沉淀标题的归一化键（标题|年份|季号）。兼容 dict 和 pydantic 模型。"""
+        def _get(obj: Any, field: str) -> Any:
+            if isinstance(obj, dict):
+                return obj.get(field)
+            return getattr(obj, field, None)
+        title = str(_get(verified, "title") or _get(guess, "name") or "").strip()
+        year = str(_get(verified, "year") or "").strip() or str(_get(guess, "year") or "").strip()
         key = f"{title}|{year}"
-        if (verified or {}).get("type") == "tv" or (guess or {}).get("media_type") == "tv":
-            key += f"|S{self._safe_int((guess or {}).get('season'), 0)}"
+        if _get(verified, "type") == "tv" or _get(guess, "media_type") == "tv":
+            key += f"|S{self._safe_int(_get(guess, 'season'), 0)}"
         return key
 
     def _is_settled(self, key: str) -> bool:
