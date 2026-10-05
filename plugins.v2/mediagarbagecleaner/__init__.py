@@ -35,7 +35,7 @@ class MediaGarbageCleaner(_PluginBase):
     plugin_name = "资源清理"
     plugin_desc = "扫描媒体库断链/硬链/重复/空目录/孤儿 strm/未整理/失败记录，并给出下载目录与媒体库的一一对应摘要（库内实体文件、下载库冗余副本、零字节文件、孤儿媒体目录）；支持按地址与名称保护、单次确认清理、手动或批量清理。"
     plugin_icon = "mdi-broom"
-    plugin_version = "1.10.0"
+    plugin_version = "1.11.0"
     plugin_label = "媒体整理"
     plugin_label = "媒体整理"
     plugin_author = "zhuzhug"
@@ -657,6 +657,68 @@ class MediaGarbageCleaner(_PluginBase):
             "content": row_content,
         }
 
+    def _grouped_rows(self, items: List[Dict[str, Any]], prefix: str, selected: dict,
+                      toggle_api: str, delete_api: str, path_key: str = "path",
+                      title_key: str = "path", subtitle_fn=None, delete_type: str = "",
+                      max_groups: int = 50) -> List[dict]:
+        """按父目录分组渲染垃圾项：同目录的多个文件合并为可展开折叠面板。
+
+        默认折叠只显示第一个文件名 + 数量，展开后列出全部文件。
+        """
+        groups: Dict[str, List[Dict[str, Any]]] = {}
+        for item in items:
+            path = item.get(path_key, "")
+            parent = os.path.dirname(path) or path
+            groups.setdefault(parent, []).append(item)
+
+        panels = []
+        idx = 0
+        for parent, group_items in list(groups.items())[:max_groups]:
+            first = group_items[0]
+            display_path = first.get(title_key, "")
+            if len(display_path) > 80:
+                display_path = "…" + display_path[-77:]
+            count = len(group_items)
+            if count > 1:
+                panel_title = f"{display_path}（+{count - 1}）"
+            else:
+                panel_title = display_path
+            sub = subtitle_fn(first, count) if subtitle_fn else ""
+
+            # 展开后的子项列表
+            child_rows = []
+            for j, child in enumerate(group_items):
+                child_key = f"{prefix}:{idx}:{j}"
+                child_path = child.get(path_key, "")
+                child_display = child_path if len(child_path) <= 80 else "…" + child_path[-77:]
+                child_sub = subtitle_fn(child, 1) if subtitle_fn else ""
+                child_rows.append(self._item_row(
+                    key=child_key, title=child_display, subtitle=child_sub,
+                    is_selected=child_key in selected, toggle_api=toggle_api,
+                    delete_api=delete_api, delete_params={"type": delete_type, "path": child_path},
+                ))
+
+            panels.append({
+                "component": "VExpansionPanels",
+                "props": {"variant": "accordion", "class": "mb-1"},
+                "content": [{
+                    "component": "VExpansionPanel",
+                    "content": [{
+                        "component": "VExpansionPanelTitle",
+                        "content": [
+                            {"component": "span", "props": {"class": "text-caption", "style": "font-family: monospace; word-break: break-all;"}, "text": panel_title},
+                            {"component": "VSpacer"},
+                            {"component": "VChip", "props": {"size": "x-small", "variant": "tonal"}, "text": str(count)},
+                        ],
+                    }, {
+                        "component": "VExpansionPanelText",
+                        "content": child_rows,
+                    }],
+                }],
+            })
+            idx += 1
+        return panels
+
     def get_page(self) -> Optional[List[dict]]:
         """返回插件详情页面：对齐「MP 运维助手」仪表盘风格的扫描结果与操作区。"""
         results = self._scan_results
@@ -747,116 +809,72 @@ class MediaGarbageCleaner(_PluginBase):
             ]},
         ]
 
-        # 断链软链接
+        # 断链软链接（按父目录分组）
         if broken:
-            rows = []
-            for i, item in enumerate(broken[:100]):
-                path = item.get("path", "")
-                key = f"b:{i}"
-                display = path if len(path) <= 80 else "…" + path[-77:]
-                rows.append(self._item_row(
-                    key=key, title=display, subtitle=f"目标：{item.get('target', '')}" if item.get("target") else "",
-                    is_selected=key in selected, toggle_api=toggle_api,
-                    delete_api=delete_api, delete_params={"type": "broken_symlink", "path": path},
-                ))
+            rows = self._grouped_rows(
+                broken, "b", selected, toggle_api, delete_api,
+                subtitle_fn=lambda item, count: f"目标：{item.get('target', '')}" if item.get("target") else "",
+                delete_type="broken_symlink",
+            )
             page.append(self._section_card("断链软链接", "mdi-link-variant-off", "error", len(broken), rows, header_actions=cat_sel("b")))
 
-        # 硬链接
+        # 硬链接（按父目录分组）
         hardlinks = results.get("hardlinks", [])
         if hardlinks:
-            rows = []
-            for i, item in enumerate(hardlinks[:100]):
-                path = item.get("path", "")
-                key = f"h:{i}"
-                display = path if len(path) <= 80 else "…" + path[-77:]
-                sub = f"inode {item.get('inode', '')}｜共 {item.get('link_count', 1)} 个链接"
-                rows.append(self._item_row(
-                    key=key, title=display, subtitle=sub,
-                    is_selected=key in selected, toggle_api=toggle_api,
-                    delete_api=delete_api, delete_params={"type": "hardlink", "path": path},
-                ))
+            rows = self._grouped_rows(
+                hardlinks, "h", selected, toggle_api, delete_api,
+                subtitle_fn=lambda item, count: f"inode {item.get('inode', '')}｜共 {item.get('link_count', 1)} 个链接" + (f"（含 {count} 项）" if count > 1 else ""),
+                delete_type="hardlink",
+            )
             page.append(self._section_card("硬链接（可清理冗余）", "mdi-link-variant", "secondary", len(hardlinks), rows, header_actions=cat_sel("h")))
 
-        # 重复文件
+        # 重复文件（按父目录分组）
         duplicates = results.get("duplicates", [])
         if duplicates:
-            rows = []
-            for i, item in enumerate(duplicates[:100]):
-                path = item.get("path", "")
-                key = f"d:{i}"
-                display = path if len(path) <= 80 else "…" + path[-77:]
-                group = item.get("group_count", 1)
-                keep = item.get("keep")
-                sub = f"同组共 {group} 份" + ("｜建议保留" if keep else "｜可清理")
-                rows.append(self._item_row(
-                    key=key, title=display, subtitle=sub,
-                    is_selected=key in selected, toggle_api=toggle_api,
-                    delete_api=delete_api, delete_params={"type": "duplicate", "path": path},
-                ))
+            rows = self._grouped_rows(
+                duplicates, "d", selected, toggle_api, delete_api,
+                subtitle_fn=lambda item, count: f"同组共 {item.get('group_count', 1)} 份{'｜含 ' + str(count) + ' 项' if count > 1 else ''}{'｜建议保留' if item.get('keep') else '｜可清理'}",
+                delete_type="duplicate",
+            )
             page.append(self._section_card("重复文件（内容相同）", "mdi-file-compare", "deep-purple", len(duplicates), rows, header_actions=cat_sel("d")))
 
-        # 空目录
+        # 空目录（按父目录分组）
         if empty:
-            rows = []
-            for i, item in enumerate(empty[:100]):
-                path = item.get("path", "")
-                key = f"e:{i}"
-                display = path if len(path) <= 80 else "…" + path[-77:]
-                rows.append(self._item_row(
-                    key=key, title=display, subtitle="",
-                    is_selected=key in selected, toggle_api=toggle_api,
-                    delete_api=delete_api, delete_params={"type": "empty_dir", "path": path},
-                ))
+            rows = self._grouped_rows(
+                empty, "e", selected, toggle_api, delete_api,
+                subtitle_fn=lambda item, count: f"含 {count} 个空目录" if count > 1 else "",
+                delete_type="empty_dir",
+            )
             page.append(self._section_card("空目录", "mdi-folder-remove-outline", "warning", len(empty), rows, header_actions=cat_sel("e")))
 
-        # 失败整理记录
+        # 失败整理记录（按作品名分组）
         if failed:
-            rows = []
-            for i, item in enumerate(failed[:100]):
-                key = f"f:{i}"
-                title = f"{item.get('title', '未知')}（{item.get('year', '')}）"
-                if item.get("dest"):
-                    title = f"{title}\n→ {item.get('dest')}"
-                rows.append(self._item_row(
-                    key=key, title=title, subtitle=(item.get("errmsg", "") or "")[:80],
-                    is_selected=key in selected, toggle_api=toggle_api,
-                    delete_api=delete_api, delete_params={"type": "failed_transfer", "id": item.get("id")},
-                    image=item.get("image", ""),
-                ))
+            rows = self._grouped_rows(
+                failed, "f", selected, toggle_api, delete_api,
+                path_key="src", title_key="title",
+                subtitle_fn=lambda item, count: f"{item.get('errmsg', '')[:60]}{'（+ ' + str(count) + ' 条）' if count > 1 else ''}",
+                delete_type="failed_transfer",
+            )
             page.append(self._section_card("失败整理记录", "mdi-alert-circle-outline", "info", len(failed), rows, header_actions=cat_sel("f")))
 
-        # 孤儿 strm（源目录已删但媒体库仍有残留）
+        # 孤儿 strm（按父目录分组）
         orphans = results.get("orphan_streams", [])
         if orphans:
-            rows = []
-            for i, item in enumerate(orphans[:100]):
-                path = item.get("path", "")
-                key = f"s:{i}"
-                display = path if len(path) <= 80 else "…" + path[-77:]
-                disk = item.get("disk", "")
-                sub = f"网盘: {disk}" if disk else ""
-                rows.append(self._item_row(
-                    key=key, title=display, subtitle=sub,
-                    is_selected=key in selected, toggle_api=toggle_api,
-                    delete_api=delete_api, delete_params={"type": "orphan_stream", "path": path},
-                ))
+            rows = self._grouped_rows(
+                orphans, "s", selected, toggle_api, delete_api,
+                subtitle_fn=lambda item, count: f"网盘: {item.get('disk', '')}{'（+ ' + str(count) + ' 个）' if count > 1 else ''}",
+                delete_type="orphan_stream",
+            )
             page.append(self._section_card("孤儿 strm（源目录已删）", "mdi-cloud-off", "deep-orange", len(orphans), rows, header_actions=cat_sel("s")))
 
-        # 下载目录未整理资源
+        # 下载目录未整理资源（按父目录分组）
         untransferred = results.get("untransferred", [])
         if untransferred:
-            rows = []
-            for i, item in enumerate(untransferred[:100]):
-                path = item.get("path", "")
-                key = f"u:{i}"
-                display = path if len(path) <= 80 else "…" + path[-77:]
-                size_str = self._format_size(item.get("size", 0))
-                sub = f"目录: {item.get('parent', '')}｜大小: {size_str}"
-                rows.append(self._item_row(
-                    key=key, title=display, subtitle=sub,
-                    is_selected=key in selected, toggle_api=toggle_api,
-                    delete_api=delete_api, delete_params={"type": "untransferred", "path": path},
-                ))
+            rows = self._grouped_rows(
+                untransferred, "u", selected, toggle_api, delete_api,
+                subtitle_fn=lambda item, count: f"目录: {item.get('parent', '')}｜大小: {self._format_size(item.get('size', 0))}{'（+ ' + str(count) + ' 个）' if count > 1 else ''}",
+                delete_type="untransferred",
+            )
             page.append(self._section_card("下载目录未整理资源", "mdi-download-off", "cyan", len(untransferred), rows, header_actions=cat_sel("u")))
 
         # 媒体库实体文件（非软链，直接占库空间）
@@ -867,17 +885,11 @@ class MediaGarbageCleaner(_PluginBase):
                 "component": "VAlert", "props": {"type": "info", "variant": "tonal", "density": "compact", "class": "mb-2"},
                 "text": f"共 {len(library_entity)} 个实体文件，合计占用 {total_entity_size}。这些是拷贝或直落进库的，不走下载器更新链路。删除后需重新整理为软链才能恢复播放。",
             })
-            rows = []
-            for i, item in enumerate(library_entity[:100]):
-                path = item.get("path", "")
-                key = f"l:{i}"
-                display = path if len(path) <= 80 else "…" + path[-77:]
-                sub = f"分类: {item.get('category', '')}｜作品: {item.get('media_dir', '')}｜{self._format_size(item.get('size', 0))}｜删除后需重新整理"
-                rows.append(self._item_row(
-                    key=key, title=display, subtitle=sub,
-                    is_selected=key in selected, toggle_api=toggle_api,
-                    delete_api=delete_api, delete_params={"type": "library_entity", "path": path},
-                ))
+            rows = self._grouped_rows(
+                library_entity, "l", selected, toggle_api, delete_api,
+                subtitle_fn=lambda item, count: f"分类: {item.get('category', '')}｜{self._format_size(item.get('size', 0))}{'（+ ' + str(count) + ' 个）' if count > 1 else ''}",
+                delete_type="library_entity",
+            )
             page.append(self._section_card("媒体库实体文件", "mdi-file-video-outline", "teal", len(library_entity), rows, header_actions=cat_sel("l")))
 
         # 下载库冗余（媒体库已有实体副本）
@@ -888,37 +900,25 @@ class MediaGarbageCleaner(_PluginBase):
                 "component": "VAlert", "props": {"type": "success", "variant": "tonal", "density": "compact", "class": "mb-2"},
                 "text": f"共 {len(download_dup)} 个，合计 {total_dup_size}。媒体库中已有独立实体副本，删除这些下载源不会丢失内容。删除前会实时复核前提是否仍然成立。",
             })
-            rows = []
-            for i, item in enumerate(download_dup[:100]):
-                path = item.get("path", "")
-                key = f"r:{i}"
-                display = path if len(path) <= 80 else "…" + path[-77:]
-                sub = f"{self._format_size(item.get('size', 0))}｜{item.get('safe_reason', '')}"
-                rows.append(self._item_row(
-                    key=key, title=display, subtitle=sub,
-                    is_selected=key in selected, toggle_api=toggle_api,
-                    delete_api=delete_api, delete_params={"type": "download_duplicate_of_entity", "path": path},
-                ))
+            rows = self._grouped_rows(
+                download_dup, "r", selected, toggle_api, delete_api,
+                subtitle_fn=lambda item, count: f"{self._format_size(item.get('size', 0))}｜{item.get('safe_reason', '')}{'（+ ' + str(count) + ' 个）' if count > 1 else ''}",
+                delete_type="download_duplicate_of_entity",
+            )
             page.append(self._section_card("下载库冗余（库内已有实体副本）", "mdi-file-tray-arrow-up-outline", "light-green", len(download_dup), rows, header_actions=cat_sel("r")))
 
-        # 零字节文件
+        # 零字节文件（按父目录分组）
         zero_byte = results.get("zero_byte", [])
         if zero_byte:
             page.append({
                 "component": "VAlert", "props": {"type": "success", "variant": "tonal", "density": "compact", "class": "mb-2"},
                 "text": f"共 {len(zero_byte)} 个零字节文件，不占用空间也不含内容，是最可以无条件清理的一类。删除前会复核文件仍为空。",
             })
-            rows = []
-            for i, item in enumerate(zero_byte[:100]):
-                path = item.get("path", "")
-                key = f"z:{i}"
-                display = path if len(path) <= 80 else "…" + path[-77:]
-                sub = f"目录: {item.get('parent', '')}｜0 B"
-                rows.append(self._item_row(
-                    key=key, title=display, subtitle=sub,
-                    is_selected=key in selected, toggle_api=toggle_api,
-                    delete_api=delete_api, delete_params={"type": "zero_byte", "path": path},
-                ))
+            rows = self._grouped_rows(
+                zero_byte, "z", selected, toggle_api, delete_api,
+                subtitle_fn=lambda item, count: f"目录: {item.get('parent', '')}｜0 B{'（+ ' + str(count) + ' 个）' if count > 1 else ''}",
+                delete_type="zero_byte",
+            )
             page.append(self._section_card("零字节文件", "mdi-file-remove-outline", "lime", len(zero_byte), rows, header_actions=cat_sel("z")))
 
         # 孤儿媒体目录（只剩刮削元数据）
@@ -929,17 +929,11 @@ class MediaGarbageCleaner(_PluginBase):
                 "component": "VAlert", "props": {"type": "warning", "variant": "tonal", "density": "compact", "class": "mb-2"},
                 "text": f"共 {len(orphan_media_dir)} 个目录，合计 {total_omd_size}。媒体库里只残留了 nfo/海报等刮削产物，视频已不存在，播放必然失败。删除前会复核目录内确实没有有效视频。",
             })
-            rows = []
-            for i, item in enumerate(orphan_media_dir[:100]):
-                path = item.get("path", "")
-                key = f'o:{i}'
-                display = path if len(path) <= 80 else "…" + path[-77:]
-                sub = f"{item.get('file_count', 0)} 个元数据文件｜{self._format_size(item.get('size', 0))}"
-                rows.append(self._item_row(
-                    key=key, title=display, subtitle=sub,
-                    is_selected=key in selected, toggle_api=toggle_api,
-                    delete_api=delete_api, delete_params={"type": "orphan_media_dir", "path": path},
-                ))
+            rows = self._grouped_rows(
+                orphan_media_dir, "o", selected, toggle_api, delete_api,
+                subtitle_fn=lambda item, count: f"{item.get('file_count', 0)} 个元数据文件｜{self._format_size(item.get('size', 0))}{'（+ ' + str(count) + ' 个目录）' if count > 1 else ''}",
+                delete_type="orphan_media_dir",
+            )
             page.append(self._section_card("孤儿媒体目录（只剩刮削元数据）", "mdi-folder-account-off-outline", "orange", len(orphan_media_dir), rows, header_actions=cat_sel("o")))
 
         # 未扫描占位
@@ -1327,38 +1321,6 @@ class MediaGarbageCleaner(_PluginBase):
             ],
         }]
 
-        # 未被引用的下载源样例：给出文件名而不是笼统数字，用户才能判断每条的性质
-        examples = corr.get("download_unreferenced_examples") or []
-        if examples:
-            rows = []
-            for p in examples:
-                display = p if len(p) <= 90 else "…" + p[-87:]
-                rows.append({
-                    "component": "VListItem", "props": {"density": "compact"},
-                    "content": [
-                        {"component": "VListItemTitle",
-                         "props": {"class": "text-caption", "style": "font-family: monospace; word-break: break-all;"},
-                         "text": display},
-                    ],
-                })
-            panel.append({
-                "component": "VCard", "props": {"variant": "outlined", "class": "mb-4"},
-                "content": [
-                    {
-                        "component": "VCardTitle",
-                        "props": {"class": "text-subtitle-2 d-flex align-center px-4 py-2"},
-                        "content": [
-                            {"component": "VIcon", "props": {"icon": "mdi-file-eye-outline", "color": "warning", "class": "mr-2", "size": "small"}},
-                            {"component": "span", "text": f"未被引用的下载源样例（共 {dl_unref} 个，最多显示 10 个）"},
-                            {"component": "VSpacer"},
-                        ],
-                    },
-                    {"component": "VDivider"},
-                    {"component": "VCardText", "props": {"class": "text-caption mb-1 py-0"},
-                     "text": "未引用不等于垃圾：可能是保种按约定保留、媒体库已有其它版本、花絮短片或空文件。此类不自动列入删除候选。"},
-                    {"component": "VList", "props": {"density": "compact", "class": "py-2"}, "content": rows},
-                ],
-            })
         return panel
 
     def _build_correspondence(self, lib_links: List[str], lib_entities: List[str],
@@ -1516,8 +1478,25 @@ class MediaGarbageCleaner(_PluginBase):
         }
 
     def _scan_broken_symlinks(self) -> List[Dict[str, Any]]:
-        """扫描媒体库中的断链软链接。"""
+        """扫描媒体库中的断链软链接。
+
+        2026-10-05 重写：通过 readlink 获取软链接指向的目标路径，
+        判断目标是否在源目录（下载目录/网盘目录）中实际存在。
+        不再依赖 os.path.exists（网盘掉线会误判），
+        而是判断指向关系：目标路径在已知源目录下且文件不存在才是真断链。
+        """
         broken = []
+        # 收集所有已知源目录路径（下载目录 + 网盘目录 + 孤儿扫描源目录）
+        source_dirs = set()
+        for d in self._load_dir_configs():
+            dp = getattr(d, "download_path", None)
+            if dp:
+                source_dirs.add(str(dp).rstrip("/"))
+        for extra in ("/media/downloads", "/media/downloads/网盘"):
+            if os.path.isdir(extra):
+                source_dirs.add(extra.rstrip("/"))
+        source_dirs.update(d.rstrip("/") for d in (self._orphan_scan_source_dirs or []) if d)
+
         for lib_dir in self._get_library_dirs():
             if not os.path.isdir(lib_dir):
                 continue
@@ -1529,12 +1508,42 @@ class MediaGarbageCleaner(_PluginBase):
                     if self._name_protected(name):
                         continue
                     filepath = os.path.join(root, name)
-                    if os.path.islink(filepath) and not os.path.exists(filepath):
-                        try:
-                            target = os.readlink(filepath)
-                        except OSError:
-                            target = "未知"
-                        broken.append({"path": filepath, "target": target, "item_type": "broken_symlink"})
+                    if not os.path.islink(filepath):
+                        continue
+                    # 获取软链接指向的目标
+                    try:
+                        target = os.readlink(filepath)
+                    except OSError:
+                        continue
+                    # 规范化目标路径（可能是相对路径）
+                    if not os.path.isabs(target):
+                        target = os.path.normpath(os.path.join(os.path.dirname(filepath), target))
+                    # 判断目标是否在已知源目录下
+                    in_source = any(target.startswith(sd) for sd in source_dirs)
+                    # 判断目标是否实际存在
+                    target_exists = os.path.exists(target)
+                    if in_source and not target_exists:
+                        # 源目录下的目标不存在：区分"网盘临时掉线"和"源文件真的删了"
+                        # 如果目标路径的父目录存在（网盘在线），只是文件没了 = 真断链
+                        # 如果父目录也不存在（网盘掉线），跳过不判定
+                        parent_dir = os.path.dirname(target)
+                        if os.path.isdir(parent_dir):
+                            broken.append({
+                                "path": filepath,
+                                "target": target,
+                                "item_type": "broken_symlink",
+                                "source_missing": True,
+                            })
+                        # 父目录不存在 = 网盘掉线，跳过不判定
+                    elif not in_source and not target_exists:
+                        # 目标不在已知源目录且不存在，也判为断链
+                        broken.append({
+                            "path": filepath,
+                            "target": target,
+                            "item_type": "broken_symlink",
+                            "source_missing": False,
+                        })
+                    # 目标存在 = 正常软链接，跳过
         return broken
 
     def _scan_hardlinks(self) -> List[Dict[str, Any]]:
@@ -2120,6 +2129,109 @@ class MediaGarbageCleaner(_PluginBase):
         os.remove(path)
         return _DELETE_MODE_DELETE, "已删除"
 
+    def _cleanup_after_delete(self, path: str, item_type: str = "") -> dict:
+        """删除文件后的联动清理：保护期检查 + 刮削残留 + 转移记录 + 下载历史 + 空目录。
+
+        整合自「清理媒体文件」插件的核心联动逻辑：
+        0. 保护期检查：最近 24 小时内有整理记录的路径跳过（防止重新整理时误删）
+        1. 清理同目录下同名的刮削文件（nfo/jpg/字幕等）
+        2. 删除 TransferHistory 中该路径的记录
+        3. 发送 DownloadFileDeleted 事件（让订阅者联动删种）
+        4. 清理空的父目录（向上最多 3 层）
+        """
+        result = {"scrap_cleaned": 0, "history_cleaned": 0, "dirs_cleaned": 0, "protected": False}
+        filepath = Path(path)
+
+        # 0. 保护期检查：最近 24 小时内有整理记录的路径跳过
+        try:
+            from app.db import ScopedSession
+            from app.db.models.transferhistory import TransferHistory
+            import time as _time
+            cutoff = _time.time() - 24 * 3600
+            db = ScopedSession()
+            try:
+                recent = db.query(TransferHistory).filter(
+                    TransferHistory.src == path,
+                    TransferHistory.date.isnot(None)
+                ).order_by(TransferHistory.date.desc()).first()
+                if recent and recent.date:
+                    from datetime import datetime, timedelta
+                    try:
+                        dt = datetime.fromisoformat(str(recent.date)) if isinstance(recent.date, str) else recent.date
+                        if hasattr(dt, 'timestamp'):
+                            if dt.timestamp() > cutoff:
+                                result["protected"] = True
+                                logger.info(f"[资源清理] 路径在保护期内（最近 24h 有整理记录），跳过联动清理: {path}")
+                                return result
+                    except Exception:
+                        pass
+            finally:
+                db.close()
+        except Exception as e:
+            logger.warning(f"[资源清理] 保护期检查失败: {e}")
+        try:
+            # 1. 清理刮削残留
+            if filepath.parent and os.path.isdir(filepath.parent):
+                name_prefix = filepath.stem
+                for f in os.listdir(filepath.parent):
+                    if f.startswith(name_prefix):
+                        fp = filepath.parent / f
+                        ext = fp.suffix.lower()
+                        if ext in (".nfo", ".jpg", ".png", ".srt", ".ass", ".ssa", ".sub", ".idx"):
+                            try:
+                                os.remove(fp)
+                                result["scrap_cleaned"] += 1
+                            except OSError:
+                                pass
+        except Exception as e:
+            logger.warning(f"[资源清理] 清理刮削残留失败: {e}")
+
+        # 2. 删除转移记录
+        try:
+            from app.db import ScopedSession
+            from app.db.models.transferhistory import TransferHistory
+            db = ScopedSession()
+            try:
+                records = db.query(TransferHistory).filter(
+                    TransferHistory.src == path
+                ).all()
+                for rec in records:
+                    db.delete(rec)
+                    result["history_cleaned"] += 1
+                if result["history_cleaned"]:
+                    db.commit()
+            finally:
+                db.close()
+        except Exception as e:
+            logger.warning(f"[资源清理] 清理转移记录失败: {e}")
+
+        # 3. 发送 DownloadFileDeleted 事件（联动删种）
+        try:
+            from app.core.event import eventmanager
+            from app.schemas.types import EventType
+            eventmanager.send_event(EventType.DownloadFileDeleted, {"src": path})
+        except Exception as e:
+            logger.warning(f"[资源清理] 发送删除事件失败: {e}")
+
+        # 4. 清理空目录（向上最多 3 层）
+        try:
+            parent = filepath.parent
+            for _ in range(3):
+                if not parent or not os.path.isdir(parent):
+                    break
+                if parent in self._get_library_dirs():
+                    break
+                if not os.listdir(parent):
+                    os.rmdir(parent)
+                    result["dirs_cleaned"] += 1
+                    parent = parent.parent
+                else:
+                    break
+        except Exception as e:
+            logger.warning(f"[资源清理] 清理空目录失败: {e}")
+
+        return result
+
     def _is_path_in_transfer_history(self, path: str) -> Optional[str]:
         """反查某个文件路径是否出现在 TransferHistory 表里（任何状态）。
 
@@ -2191,8 +2303,9 @@ class MediaGarbageCleaner(_PluginBase):
 
         try:
             if item_type == "broken_symlink" and os.path.islink(path):
-                # 只删除断链本体：数据库记录与刮削残留由「清理媒体文件」插件负责
+                # 删除断链本体 + 联动清理刮削残留/转移记录/空目录
                 os.remove(path)
+                self._cleanup_after_delete(path, item_type)
                 self._scan_results["broken_symlinks"] = [x for x in self._scan_results.get("broken_symlinks", []) if x.get("path") != path]
                 self._update_summary()
                 self.save_data("scan_results", self._scan_results)
@@ -2212,8 +2325,9 @@ class MediaGarbageCleaner(_PluginBase):
                 return {"success": True, "message": msg}
 
             elif item_type == "hardlink" and os.path.isfile(path) and not os.path.islink(path):
-                # 硬链为普通文件（非符号链接），删除一条不影响其余持有同 inode 的链接
+                # 硬链删除 + 联动清理
                 mode_used, removed_msg = self._remove_file(path)
+                self._cleanup_after_delete(path, item_type)
                 self._scan_results["hardlinks"] = [x for x in self._scan_results.get("hardlinks", []) if x.get("path") != path]
                 self._update_summary()
                 self.save_data("scan_results", self._scan_results)
@@ -2223,8 +2337,9 @@ class MediaGarbageCleaner(_PluginBase):
                 return {"success": True, "message": msg}
 
             elif item_type == "duplicate" and os.path.isfile(path) and not os.path.islink(path):
-                # 重复文件：内容相同的独立副本，删除不影响同组其它副本
+                # 重复文件删除 + 联动清理
                 mode_used, removed_msg = self._remove_file(path)
+                self._cleanup_after_delete(path, item_type)
                 self._scan_results["duplicates"] = [x for x in self._scan_results.get("duplicates", []) if x.get("path") != path]
                 self._update_summary()
                 self.save_data("scan_results", self._scan_results)
