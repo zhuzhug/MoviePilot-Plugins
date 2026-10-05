@@ -75,7 +75,7 @@ class AIPair(_PluginBase):
     plugin_name = "AI双引擎识别"
     plugin_desc = "整合 AI 识别增强与 AI 识别词：原生识别失败时做结构化兜底（救当次），成功后沉淀窄作用域识别词（救以后）。识别词写入走全量快照比对、只增不删、写后逐行校验，杜绝清空用户识别词。致谢 liuyuexi1987 的开源识别增强实现。"
     plugin_icon = "mdi-robot-happy-outline"
-    plugin_version = "1.0.20"
+    plugin_version = "1.0.21"
     plugin_label = "识别,增强"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "aipair_"
@@ -445,9 +445,14 @@ class AIPair(_PluginBase):
         title, path = self._extract_title_path(event_data)
         if not title and not path:
             return
-        # 路径过滤：只处理指定目录下的资源（如 /media/downloads），避免订阅/历史/媒体库扫描触发
-        if path and self._active_path and not path.startswith(self._active_path):
-            return
+        # 路径过滤：只处理指定目录下的资源（如 /media/downloads）。
+        # 2026-10-05 修复：必须同时满足「有 path」且「在生效目录内」。
+        # 之前 path 为空时绕过过滤，导致订阅/站点搜索（只有 title 无 path）也触发 AI。
+        if self._active_path:
+            if not path:
+                return
+            if not path.startswith(self._active_path):
+                return
         # 异步执行，不阻塞原生链路
         threading.Thread(
             target=self._handle_recognition_failure,
