@@ -35,7 +35,7 @@ class MediaGarbageCleaner(_PluginBase):
     plugin_name = "资源清理"
     plugin_desc = "扫描媒体库断链/硬链/重复/空目录/孤儿 strm/未整理/失败记录，并给出下载目录与媒体库的一一对应摘要（库内实体文件、下载库冗余副本、零字节文件、孤儿媒体目录）；支持按地址与名称保护、单次确认清理、手动或批量清理。"
     plugin_icon = "mdi-broom"
-    plugin_version = "1.11.0"
+    plugin_version = "1.12.0"
     plugin_label = "媒体整理"
     plugin_label = "媒体整理"
     plugin_author = "zhuzhug"
@@ -63,6 +63,7 @@ class MediaGarbageCleaner(_PluginBase):
     _media_files_cache: Optional[Tuple[List[str], List[str], List[str]]] = None  # 媒体文件遍历缓存
     _selected: Dict[str, str] = {}  # 已选中的项目 key -> 标识符
     _delete_item_confirmed: bool = False  # 单条删除确认令牌（一次性）
+    _linked_cleanup: bool = True  # 联动删除开关：删除时同步清理刮削残留/转移记录/发送删除事件/清空目录
 
     def init_plugin(self, config: dict = None) -> None:
         """根据插件配置初始化运行状态。"""
@@ -105,6 +106,8 @@ class MediaGarbageCleaner(_PluginBase):
         else:
             self._reserved_keywords = []
         self._delete_mode = _DELETE_MODE_TRASH if config.get("delete_to_trash") else _DELETE_MODE_DELETE
+        # 联动删除开关：删除时是否同步清理刮削残留/转移记录/发送删除事件/清空目录
+        self._linked_cleanup = bool(config.get("linked_cleanup", True))
         # 回收站依赖检查：缺失时删除会回退为永久删除，需在启动日志里明确告知
         if self._delete_mode == _DELETE_MODE_TRASH:
             try:
@@ -193,6 +196,7 @@ class MediaGarbageCleaner(_PluginBase):
                         "placeholder": "如: 寻梦环游记|鬼灭之刃|权力的游戏",
                     }},
                     {"component": "VSwitch", "props": {"model": "delete_to_trash", "label": "删除走回收站（可恢复；回收站不可用时自动回退直接删除）"}},
+                    {"component": "VSwitch", "props": {"model": "linked_cleanup", "label": "联动删除（关闭后只删文件本体，不同步清理刮削残留/转移记录/删除事件/空目录）"}},
                     {"component": "VTextField", "props": {
                         "model": "reserved_keywords",
                         "label": "保留关键词（| 分隔；路径任一层目录名命中即永久豁免，不扫描不删除）",
@@ -248,6 +252,7 @@ class MediaGarbageCleaner(_PluginBase):
         ], {"enabled": False, "exclude_dirs": [], "dup_only_video": True, "protect_name_keywords": "",
             "orphan_scan_enabled": False, "orphan_scan_source_dirs": [], "orphan_scan_keep_disks": "",
             "untransfer_scan_enabled": False, "delete_to_trash": True, "reserved_keywords": "",
+            "linked_cleanup": True,
             "scan_library_entity": False, "scan_download_dup": False,
             "scan_zero_byte": False, "scan_orphan_media_dir": False}
 
@@ -2138,8 +2143,13 @@ class MediaGarbageCleaner(_PluginBase):
         2. 删除 TransferHistory 中该路径的记录
         3. 发送 DownloadFileDeleted 事件（让订阅者联动删种）
         4. 清理空的父目录（向上最多 3 层）
+
+        开关：linked_cleanup=False 时只删文件本体，不做任何联动清理。
         """
         result = {"scrap_cleaned": 0, "history_cleaned": 0, "dirs_cleaned": 0, "protected": False}
+        if not self._linked_cleanup:
+            logger.info(f"[资源清理] 联动删除已关闭，仅删除文件本体: {path}")
+            return result
         filepath = Path(path)
 
         # 0. 保护期检查：最近 24 小时内有整理记录的路径跳过
@@ -2304,14 +2314,14 @@ class MediaGarbageCleaner(_PluginBase):
         try:
             if item_type == "broken_symlink" and os.path.islink(path):
                 # 删除断链本体 + 联动清理刮削残留/转移记录/空目录
+                cleanup_result = self._cleanup_after_delete(path, item_type)
                 os.remove(path)
-                self._cleanup_after_delete(path, item_type)
                 self._scan_results["broken_symlinks"] = [x for x in self._scan_results.get("broken_symlinks", []) if x.get("path") != path]
                 self._update_summary()
                 self.save_data("scan_results", self._scan_results)
-                msg = f"已删除: {os.path.basename(path)}"
+                msg = f"已删除断链: {os.path.basename(path)}"
                 if not silent:
-                    self._notify_result("删除完成", msg)
+                    self._notify_result("删除完成", msg, linked_cleanup=cleanup_result)
                 return {"success": True, "message": msg}
 
             elif item_type == "empty_dir" and os.path.isdir(path) and not os.listdir(path):
@@ -2319,44 +2329,50 @@ class MediaGarbageCleaner(_PluginBase):
                 self._scan_results["empty_dirs"] = [x for x in self._scan_results.get("empty_dirs", []) if x.get("path") != path]
                 self._update_summary()
                 self.save_data("scan_results", self._scan_results)
-                msg = f"已删除: {os.path.basename(path)}"
+                msg = f"已删除空目录: {os.path.basename(path)}"
                 if not silent:
                     self._notify_result("删除完成", msg)
                 return {"success": True, "message": msg}
 
             elif item_type == "hardlink" and os.path.isfile(path) and not os.path.islink(path):
                 # 硬链删除 + 联动清理
+                file_size = os.path.getsize(path) if os.path.isfile(path) else 0
+                cleanup_result = self._cleanup_after_delete(path, item_type)
                 mode_used, removed_msg = self._remove_file(path)
-                self._cleanup_after_delete(path, item_type)
                 self._scan_results["hardlinks"] = [x for x in self._scan_results.get("hardlinks", []) if x.get("path") != path]
                 self._update_summary()
                 self.save_data("scan_results", self._scan_results)
                 msg = f"{removed_msg}硬链接: {os.path.basename(path)}"
                 if not silent:
-                    self._notify_result("删除完成", msg)
+                    self._notify_result("删除完成", msg, linked_cleanup=cleanup_result, size=file_size)
                 return {"success": True, "message": msg}
 
             elif item_type == "duplicate" and os.path.isfile(path) and not os.path.islink(path):
                 # 重复文件删除 + 联动清理
+                try:
+                    dup_size = os.path.getsize(path)
+                except OSError:
+                    dup_size = 0
+                cleanup_result = self._cleanup_after_delete(path, item_type)
                 mode_used, removed_msg = self._remove_file(path)
-                self._cleanup_after_delete(path, item_type)
                 self._scan_results["duplicates"] = [x for x in self._scan_results.get("duplicates", []) if x.get("path") != path]
                 self._update_summary()
                 self.save_data("scan_results", self._scan_results)
                 msg = f"{removed_msg}重复文件: {os.path.basename(path)}"
                 if not silent:
-                    self._notify_result("删除完成", msg)
+                    self._notify_result("删除完成", msg, linked_cleanup=cleanup_result, size=dup_size)
                 return {"success": True, "message": msg}
 
             elif item_type == "orphan_stream" and os.path.isfile(path) and not os.path.islink(path):
                 # 只删除孤儿 strm 本体：同目录刮削残留、空目录与数据库记录由「清理媒体文件」插件负责
+                cleanup_result = self._cleanup_after_delete(path, item_type)
                 os.remove(path)
                 self._scan_results["orphan_streams"] = [x for x in self._scan_results.get("orphan_streams", []) if x.get("path") != path]
                 self._update_summary()
                 self.save_data("scan_results", self._scan_results)
                 msg = f"已删除孤儿 strm: {os.path.basename(path)}"
                 if not silent:
-                    self._notify_result("删除完成", msg)
+                    self._notify_result("删除完成", msg, linked_cleanup=cleanup_result)
                 return {"success": True, "message": msg}
 
             elif item_type == "failed_transfer" and item_id:
@@ -2405,11 +2421,12 @@ class MediaGarbageCleaner(_PluginBase):
                     if not silent:
                         self._notify_result("删除被拒绝", msg, fail=True)
                     return {"success": False, "message": msg}
-                # 只删除文件本体：空目录与数据库记录由「清理媒体文件」插件负责
+                # 联动清理 + 删除文件本体
                 try:
                     size = os.path.getsize(path)
                 except OSError:
                     size = 0
+                cleanup_result = self._cleanup_after_delete(path, item_type)
                 mode_used, removed_msg = self._remove_file(path)
                 self._scan_results["untransferred"] = [x for x in self._scan_results.get("untransferred", []) if x.get("path") != path]
                 self._update_summary()
@@ -2417,7 +2434,7 @@ class MediaGarbageCleaner(_PluginBase):
                 size_str = self._format_size(size) if size else ""
                 msg = f"{removed_msg}未整理文件: {os.path.basename(path)}" + (f"（{size_str}）" if size_str else "")
                 if not silent:
-                    self._notify_result("删除完成", msg)
+                    self._notify_result("删除完成", msg, linked_cleanup=cleanup_result, size=size)
                 return {"success": True, "message": msg}
 
             elif item_type == "zero_byte" and os.path.isfile(path) and not os.path.islink(path):
@@ -2463,9 +2480,10 @@ class MediaGarbageCleaner(_PluginBase):
                 ]
                 self._update_summary()
                 self.save_data("scan_results", self._scan_results)
+                dup_size = self._sum_items_size([{"path": path}])
                 msg = f"{removed_msg}冗余下载源: {os.path.basename(path)}"
                 if not silent:
-                    self._notify_result("删除完成", msg)
+                    self._notify_result("删除完成", msg, size=dup_size)
                 return {"success": True, "message": msg}
 
             elif item_type == "library_entity" and os.path.isfile(path) and not os.path.islink(path):
@@ -2479,9 +2497,10 @@ class MediaGarbageCleaner(_PluginBase):
                 self._scan_results["library_entity"] = [x for x in self._scan_results.get("library_entity", []) if x.get("path") != path]
                 self._update_summary()
                 self.save_data("scan_results", self._scan_results)
+                ent_size = self._sum_items_size([{"path": path}])
                 msg = f"{removed_msg}媒体库实体文件: {os.path.basename(path)}"
                 if not silent:
-                    self._notify_result("删除完成", msg)
+                    self._notify_result("删除完成", msg, size=ent_size)
                 return {"success": True, "message": msg}
 
             elif item_type == "orphan_media_dir":
@@ -2519,9 +2538,10 @@ class MediaGarbageCleaner(_PluginBase):
                 self._scan_results["orphan_media_dir"] = [x for x in self._scan_results.get("orphan_media_dir", []) if x.get("path") != path]
                 self._update_summary()
                 self.save_data("scan_results", self._scan_results)
+                omd_size = self._sum_items_size([{"type": "orphan_media_dir", "path": path}])
                 msg = f"已删除孤儿媒体目录: {os.path.basename(path)}"
                 if not silent:
-                    self._notify_result("删除完成", msg)
+                    self._notify_result("删除完成", msg, size=omd_size)
                 return {"success": True, "message": msg}
 
             msg = "无法删除（项目可能已不存在或参数不匹配）"
@@ -2908,13 +2928,32 @@ class MediaGarbageCleaner(_PluginBase):
 
     # ==================== 通知 ====================
 
-    def _notify_result(self, title: str, text: str, fail: bool = False) -> None:
+    def _notify_result(self, title: str, text: str, fail: bool = False, linked_cleanup: Optional[Dict[str, Any]] = None, size: int = 0) -> None:
         """删除结果推送通知，便于用户确认是否真正生效。"""
         try:
+            # 组装通知内容
+            lines = [text]
+            # 联动清理信息
+            if linked_cleanup and not fail:
+                scrap = linked_cleanup.get("scrap_cleaned", 0)
+                history = linked_cleanup.get("history_cleaned", 0)
+                dirs = linked_cleanup.get("dirs_cleaned", 0)
+                protected = linked_cleanup.get("protected", False)
+                if protected:
+                    lines.append("⚠️ 保护期内，联动清理已跳过")
+                elif scrap or history or dirs:
+                    parts = []
+                    if scrap: parts.append(f"刮削残留 {scrap} 个")
+                    if history: parts.append(f"转移记录 {history} 条")
+                    if dirs: parts.append(f"空目录 {dirs} 层")
+                    lines.append(f"📂 联动清理: {'、'.join(parts)}")
+            # 空间信息
+            if size > 0 and not fail:
+                lines.append(f"📦 释放空间: {self._format_size(size)}")
             self.post_message(
                 mtype=NotificationType.Plugin,
-                title=f"媒体垃圾扫描 - {title}",
-                text=text,
+                title=f"资源清理 - {title}",
+                text="\n".join(lines),
             )
         except Exception as err:  # noqa: BLE001
             logger.debug(f"[MediaGarbageCleaner] 通知发送失败（忽略）: {err}")
