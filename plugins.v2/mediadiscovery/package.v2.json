@@ -1,0 +1,14 @@
+{
+    "MediaDiscovery": {
+        "name": "当季新番与热门影视",
+        "description": "发现当季新番和热门影视，支持多数据源（TMDB/Bangumi/蜜柑/番组百科），按日期分组，一键订阅追剧。番剧视图与影视视图可切换。",
+        "labels": "订阅",
+        "version": "1.0.0",
+        "icon": "mdi-play-circle",
+        "author": "zhuzhug",
+        "level": 1,
+        "history": {
+            "v1.0.0": "初始版本：合并当季新番与热门TV与电影插件，支持番剧/影视双视图切换"
+        }
+    }
+}
