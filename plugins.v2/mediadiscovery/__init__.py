@@ -3,7 +3,7 @@
 
 合并「当季新番」与「热门TV与电影」：
 - 番剧视图：TMDB / Bangumi / 蜜柑 / 番组百科 / 每日更新 多源整合，按星期分组
-- 影视视图：TMDB 真人影视（排除动画），TV 按星期分组，电影按月份分组
+- 影视视图：TMDB 热门影视（排除动画），TV 按热度排序，电影按热度排序
 - 统一订阅：自动识别最新季，避免重复订阅
 """
 
@@ -45,7 +45,7 @@ class MediaDiscovery(_PluginBase):
     plugin_name = "当季新番与热门影视"
     plugin_desc = "发现当季新番和热门影视，支持多数据源，按日期分组，一键订阅追剧。"
     plugin_icon = "mdi-play-circle"
-    plugin_version = "1.2.0"
+    plugin_version = "1.3.0"
     plugin_label = "订阅"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "media_discovery_"
@@ -55,7 +55,7 @@ class MediaDiscovery(_PluginBase):
     _enabled = False
     _current_view = "anime"  # 当前视图：anime 或 movies（详情页切换按钮控制）
     _anime_source = "auto"   # 番剧数据源
-    _movies_source = "tmdb_hot"  # 真人影视数据源
+    _movies_source = "tmdb_hot"  # 影视数据源
     _min_rating = 0.0
     _min_year = 0
     _auto_refresh = ""
@@ -176,10 +176,10 @@ class MediaDiscovery(_PluginBase):
                             "model": "movies_source", "label": "影视数据源",
                             "items": [
                                 {"title": "自动整合（TMDB+豆瓣）", "value": "auto"},
-                                {"title": "TMDB 热门真人影视", "value": "tmdb_hot"},
+                                {"title": "TMDB 热门影视", "value": "tmdb_hot"},
                                 {"title": "豆瓣热榜（TV+电影）", "value": "douban_hot"},
                             ],
-                            "hint": "影视视图使用（真人剧集+电影，排除动画）",
+                            "hint": "影视视图使用（剧集+电影，排除动画）",
                             "persistent-hint": True,
                         }}
                     ]},
@@ -217,7 +217,7 @@ class MediaDiscovery(_PluginBase):
     # ==================== 页面渲染 ====================
 
     def get_page(self) -> Optional[List[dict]]:
-        """渲染插件详情页面。"""
+        """渲染插件详情页面（番剧/影视共用统一布局）。"""
         if not self._enabled:
             return None
         api_token = settings.API_TOKEN
@@ -225,17 +225,6 @@ class MediaDiscovery(_PluginBase):
         self._loading = True
         data = self._get_anime_list()
         self._loading = False
-        if self._loading:
-            return [
-                {"component": "VCard", "props": {"variant": "tonal"}, "content": [
-                    {"component": "VCardText", "content": [
-                        {"component": "div", "props": {"class": "text-center pa-4"}, "content": [
-                            {"component": "VProgressCircular", "props": {"indeterminate": True, "color": "primary", "class": "mb-2"}},
-                            {"component": "div", "props": {"class": "text-body-1 text-grey"}, "text": "正在加载数据..."},
-                        ]},
-                    ]},
-                ]},
-            ]
         if not data:
             return [
                 {"component": "VCard", "props": {"variant": "tonal"}, "content": [
@@ -259,55 +248,54 @@ class MediaDiscovery(_PluginBase):
         if self._hide_subscribed:
             data = [a for a in data if not a.get("subscribed")]
 
-        # 按媒体类型分组
+        is_anime_view = self._current_view == "anime"
         from collections import OrderedDict
-        tv_list = [a for a in data if a.get("media_type", "tv") == "tv"]
-        movie_list = [a for a in data if a.get("media_type", "tv") == "movie"]
+        # 按热度/评分降序排列（TMDB 用 popularity，豆瓣用 rating）
+        data_sorted = sorted(
+            data,
+            key=lambda a: a.get("popularity", 0) if a.get("popularity", 0) else a.get("rating", 0),
+            reverse=True
+        )
 
-        # TV动画/剧集按星期分组
-        weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
-        tv_dated: OrderedDict = OrderedDict()
-        tv_undated = []
-        for anime in tv_list:
-            ad = anime.get("air_date", "")
-            try:
-                dt = datetime.strptime(ad, "%Y-%m-%d")
-                dk = weekdays[dt.weekday()]
-                tv_dated.setdefault(dk, []).append(anime)
-            except Exception:
-                tv_undated.append(anime)
-
-        # 按星期顺序排序
-        sorted_tv_dated: OrderedDict = OrderedDict()
-        for dk in weekdays:
-            if dk in tv_dated:
-                sorted_tv_dated[dk] = tv_dated[dk]
-        tv_dated = sorted_tv_dated
-
-        # 电影/OVA/剧场版按日期分组
-        movie_dated: OrderedDict = OrderedDict()
-        movie_undated = []
-        for anime in movie_list:
-            ad = anime.get("air_date", "")
-            try:
-                dt = datetime.strptime(ad, "%Y-%m-%d")
-                dk = dt.strftime("%Y年%m月")
-                movie_dated.setdefault(dk, []).append(anime)
-            except Exception:
-                movie_undated.append(anime)
-
-        # 按月份从新到旧排序
-        sorted_movie_dated: OrderedDict = OrderedDict()
-        for dk in sorted(movie_dated.keys(), reverse=True):
-            sorted_movie_dated[dk] = movie_dated[dk]
-        movie_dated = sorted_movie_dated
-
-        total = len(data)
+        # 按媒体类型分组
+        tv_list = [a for a in data_sorted if a.get("media_type", "tv") == "tv"]
+        movie_list = [a for a in data_sorted if a.get("media_type", "tv") == "movie"]
+        total = len(data_sorted)
         tv_count = len(tv_list)
         movie_count = len(movie_list)
-        sub_count = sum(1 for a in data if a.get("subscribed"))
+        sub_count = sum(1 for a in data_sorted if a.get("subscribed"))
 
-        is_anime_view = self._current_view == "anime"
+        def _render_grid(items: List[Dict[str, Any]], visible_count: int, color: str) -> List[dict]:
+            """渲染卡片网格：前 visible_count 个直接显示，其余折叠。"""
+            cols = [self._build_anime_card(a, api_token) for a in items]
+            result: List[dict] = []
+            if not cols:
+                return result
+            # 前 visible_count 个直接显示
+            for i in range(0, min(visible_count, len(cols)), 2):
+                row_content = []
+                row_content.append({"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i]]})
+                if i + 1 < len(cols) and i + 1 < visible_count:
+                    row_content.append({"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i + 1]]})
+                result.append({"component": "VRow", "props": {"dense": True}, "content": row_content})
+            # 折叠剩余
+            if len(cols) > visible_count:
+                expansion_content = []
+                for i in range(visible_count, len(cols), 2):
+                    row_content = []
+                    row_content.append({"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i]]})
+                    if i + 1 < len(cols):
+                        row_content.append({"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i + 1]]})
+                    expansion_content.append({"component": "VRow", "props": {"dense": True}, "content": row_content})
+                result.append({"component": "VExpansionPanels", "props": {"variant": "accordion", "multiple": True}, "content": [
+                    {"component": "VExpansionPanel", "props": {}, "content": [
+                        {"component": "VExpansionPanelTitle", "props": {"class": "text-subtitle-2 d-flex align-center px-3 py-2"}, "content": [
+                            {"component": "VChip", "props": {"color": color, "variant": "flat", "size": "small", "class": "mr-2"}, "text": f"展开更多 ({len(cols) - visible_count} 部)"},
+                        ]},
+                        {"component": "VExpansionPanelText", "props": {"class": "pa-3"}, "content": expansion_content},
+                    ]},
+                ]})
+            return result
 
         page = [
             # 视图切换按钮组
@@ -328,7 +316,8 @@ class MediaDiscovery(_PluginBase):
                             "prepend-icon": "mdi-movie-open",
                         }, "text": "热门影视",
                          "events": {"click": {"api": f"plugin/MediaDiscovery/switch_view?apikey={api_token}", "method": "post", "params": {"view": "movies"}}}},
-                        {"component": "VChip", "props": {"color": is_anime_view and "primary" or "orange", "variant": "flat", "size": "small"}, "text": f"当前: {'番剧' if is_anime_view else '热门影视'}"},
+                        {"component": "VChip", "props": {"color": "primary" if is_anime_view else "orange", "variant": "flat", "size": "small"}, "text": f"当前: {'番剧' if is_anime_view else '热门影视'}"},
+                        {"component": "VChip", "props": {"color": "grey", "variant": "outlined", "size": "small", "class": "ml-2"}, "text": "热度排序: 高→低"},
                     ]},
                 ]},
             ]},
@@ -338,7 +327,7 @@ class MediaDiscovery(_PluginBase):
                     {"component": "VCard", "props": {"variant": "tonal", "color": "primary"}, "content": [
                         {"component": "VCardText", "props": {"class": "text-center py-2"}, "content": [
                             {"component": "div", "props": {"class": "text-h5 font-weight-bold"}, "text": str(tv_count)},
-                            {"component": "div", "props": {"class": "text-caption"}, "text": "TV动画" if is_anime_view else "TV剧集"},
+                            {"component": "div", "props": {"class": "text-caption"}, "text": "TV动画" if is_anime_view else "TV"},
                         ]},
                     ]},
                 ]},
@@ -346,7 +335,7 @@ class MediaDiscovery(_PluginBase):
                     {"component": "VCard", "props": {"variant": "tonal", "color": "orange"}, "content": [
                         {"component": "VCardText", "props": {"class": "text-center py-2"}, "content": [
                             {"component": "div", "props": {"class": "text-h5 font-weight-bold"}, "text": str(movie_count)},
-                            {"component": "div", "props": {"class": "text-caption"}, "text": "电影/OVA"},
+                            {"component": "div", "props": {"class": "text-caption"}, "text": "电影"},
                         ]},
                     ]},
                 ]},
@@ -382,123 +371,22 @@ class MediaDiscovery(_PluginBase):
             ]},
         ]
 
-        # 渲染TV分组
-        logger.info(f"TV分组: dated={len(tv_dated)}, undated={len(tv_undated)}, total={tv_count}, view={self._current_view}")
-        if tv_dated or tv_undated:
+        # TV 分组（番剧/影视共用统一布局）
+        if tv_list:
             page.append({"component": "div", "props": {"class": "d-flex align-center mb-1 mt-2"}, "content": [
                 {"component": "VChip", "props": {"color": "primary", "variant": "flat", "size": "small", "class": "mr-2"}, "text": "TV动画" if is_anime_view else "TV剧集"},
-                {"component": "div", "props": {"class": "text-caption text-grey"}, "text": f"{tv_count} 部"},
+                {"component": "div", "props": {"class": "text-caption text-grey"}, "text": f"{tv_count} 部（按热度排序）"},
             ]})
+            page.extend(_render_grid(tv_list, 4, "primary"))
 
-            # 按星期分组
-            for dk, animes in tv_dated.items():
-                logger.info(f"TV星期分组: {dk}, 数量={len(animes)}, 标题: {[a.get('title') for a in animes[:5]]}")
-                page.append({"component": "div", "props": {"class": "d-flex align-center mb-1 mt-2"}, "content": [
-                    {"component": "VChip", "props": {"color": "blue", "variant": "outlined", "size": "x-small", "class": "mr-2"}, "text": dk},
-                    {"component": "div", "props": {"class": "text-caption text-grey"}, "text": f"{len(animes)} 部"},
-                ]})
-                cols = [self._build_anime_card(a, api_token) for a in animes]
-                if len(cols) <= 4:
-                    for i in range(0, len(cols), 2):
-                        row_content = []
-                        row_content.append({"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i]]})
-                        if i + 1 < len(cols):
-                            row_content.append({"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i + 1]]})
-                        page.append({"component": "VRow", "props": {"dense": True}, "content": row_content})
-                else:
-                    for i in range(0, 4, 2):
-                        row_content = []
-                        row_content.append({"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i]]})
-                        if i + 1 < 4:
-                            row_content.append({"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i + 1]]})
-                        page.append({"component": "VRow", "props": {"dense": True}, "content": row_content})
-                    expansion_content = []
-                    for i in range(4, len(cols), 2):
-                        row_content = []
-                        row_content.append({"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i]]})
-                        if i + 1 < len(cols):
-                            row_content.append({"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i + 1]]})
-                        expansion_content.append({"component": "VRow", "props": {"dense": True}, "content": row_content})
-                    page.append({"component": "VExpansionPanels", "props": {"variant": "accordion", "multiple": True}, "content": [
-                        {"component": "VExpansionPanel", "props": {}, "content": [
-                            {"component": "VExpansionPanelTitle", "props": {"class": "text-subtitle-2 d-flex align-center px-3 py-2"}, "content": [
-                                {"component": "VChip", "props": {"color": "blue", "variant": "flat", "size": "small", "class": "mr-2"}, "text": f"展开更多 ({len(cols) - 4} 部)"},
-                            ]},
-                            {"component": "VExpansionPanelText", "props": {"class": "pa-3"}, "content": expansion_content},
-                        ]},
-                    ]})
-
-            # 无日期的TV
-            if tv_undated:
-                page.append({"component": "div", "props": {"class": "d-flex align-center mb-1 mt-2"}, "content": [
-                    {"component": "VChip", "props": {"color": "grey", "variant": "outlined", "size": "x-small", "class": "mr-2"}, "text": "其他"},
-                    {"component": "div", "props": {"class": "text-caption text-grey"}, "text": f"{len(tv_undated)} 部"},
-                ]})
-                cols = [self._build_anime_card(a, api_token) for a in tv_undated]
-                if len(cols) <= 4:
-                    for i in range(0, len(cols), 2):
-                        row_content = []
-                        row_content.append({"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i]]})
-                        if i + 1 < len(cols):
-                            row_content.append({"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i + 1]]})
-                        page.append({"component": "VRow", "props": {"dense": True}, "content": row_content})
-                else:
-                    for i in range(0, 4, 2):
-                        row_content = []
-                        row_content.append({"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i]]})
-                        if i + 1 < 4:
-                            row_content.append({"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i + 1]]})
-                        page.append({"component": "VRow", "props": {"dense": True}, "content": row_content})
-                    expansion_content = []
-                    for i in range(4, len(cols), 2):
-                        row_content = []
-                        row_content.append({"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i]]})
-                        if i + 1 < len(cols):
-                            row_content.append({"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i + 1]]})
-                        expansion_content.append({"component": "VRow", "props": {"dense": True}, "content": row_content})
-                    page.append({"component": "VExpansionPanels", "props": {"variant": "accordion", "multiple": True}, "content": [
-                        {"component": "VExpansionPanel", "props": {}, "content": [
-                            {"component": "VExpansionPanelTitle", "props": {"class": "text-subtitle-2 d-flex align-center px-3 py-2"}, "content": [
-                                {"component": "VChip", "props": {"color": "grey", "variant": "flat", "size": "small", "class": "mr-2"}, "text": f"展开更多 ({len(cols) - 4} 部)"},
-                            ]},
-                            {"component": "VExpansionPanelText", "props": {"class": "pa-3"}, "content": expansion_content},
-                        ]},
-                    ]})
-
-        # 渲染电影/OVA/剧场版分组
-        if movie_dated or movie_undated:
+        # 电影分组（番剧/影视共用统一布局）
+        if movie_list:
             page.append({"component": "VDivider", "props": {"class": "my-3"}})
             page.append({"component": "div", "props": {"class": "d-flex align-center mb-1 mt-2"}, "content": [
-                {"component": "VChip", "props": {"color": "orange", "variant": "flat", "size": "small", "class": "mr-2"}, "text": "电影/OVA/剧场版"},
-                {"component": "div", "props": {"class": "text-caption text-grey"}, "text": f"{movie_count} 部"},
+                {"component": "VChip", "props": {"color": "orange", "variant": "flat", "size": "small", "class": "mr-2"}, "text": "电影" if is_anime_view else "电影/热映"},
+                {"component": "div", "props": {"class": "text-caption text-grey"}, "text": f"{movie_count} 部（按热度排序）"},
             ]})
-
-            for dk, animes in movie_dated.items():
-                logger.info(f"电影月份分组: {dk}, 数量={len(animes)}, 标题: {[a.get('title') for a in animes[:5]]}")
-                page.append({"component": "div", "props": {"class": "d-flex align-center mb-1 mt-2"}, "content": [
-                    {"component": "VChip", "props": {"color": "orange", "variant": "outlined", "size": "x-small", "class": "mr-2"}, "text": dk},
-                    {"component": "div", "props": {"class": "text-caption text-grey"}, "text": f"{len(animes)} 部"},
-                ]})
-                cols = [self._build_anime_card(a, api_token) for a in animes]
-                for i in range(0, len(cols), 2):
-                    row_content = []
-                    row_content.append({"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i]]})
-                    if i + 1 < len(cols):
-                        row_content.append({"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i + 1]]})
-                    page.append({"component": "VRow", "props": {"dense": True}, "content": row_content})
-
-            if movie_undated:
-                page.append({"component": "div", "props": {"class": "d-flex align-center mb-1 mt-2"}, "content": [
-                    {"component": "VChip", "props": {"color": "grey", "variant": "outlined", "size": "x-small", "class": "mr-2"}, "text": "其他"},
-                    {"component": "div", "props": {"class": "text-caption text-grey"}, "text": f"{len(movie_undated)} 部"},
-                ]})
-                cols = [self._build_anime_card(a, api_token) for a in movie_undated]
-                for i in range(0, len(cols), 2):
-                    row_content = []
-                    row_content.append({"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i]]})
-                    if i + 1 < len(cols):
-                        row_content.append({"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i + 1]]})
-                    page.append({"component": "VRow", "props": {"dense": True}, "content": row_content})
+            page.extend(_render_grid(movie_list, 4, "orange"))
 
         return page
 
@@ -715,7 +603,7 @@ class MediaDiscovery(_PluginBase):
                 tv_data = json.loads(tv_resp)
                 sl = self._get_season_label()
                 for item in tv_data.get("results", [])[:50]:
-                    anime_list.append({"title": item.get("name", ""), "year": str(item.get("first_air_date", "")[:4]) if item.get("first_air_date") else "", "air_date": item.get("first_air_date", ""), "season": sl, "rating": round(item.get("vote_average", 0), 1), "poster": f"https://image.tmdb.org/t/p/w300{item.get('poster_path', '')}" if item.get("poster_path") else "", "overview": item.get("overview", ""), "tmdb_id": item.get("id", ""), "media_type": "tv", "subscribed": False})
+                    anime_list.append({"title": item.get("name", ""), "year": str(item.get("first_air_date", "")[:4]) if item.get("first_air_date") else "", "air_date": item.get("first_air_date", ""), "season": sl, "rating": round(item.get("vote_average", 0), 1), "poster": f"https://image.tmdb.org/t/p/w300{item.get('poster_path', '')}" if item.get("poster_path") else "", "overview": item.get("overview", ""), "tmdb_id": item.get("id", ""), "popularity": round(item.get("popularity", 0) or 0, 2), "media_type": "tv", "subscribed": False})
 
             # 查询当季动画电影（genre 16 且是 movie）
             mov_gte, mov_lte = self._get_season_range()
@@ -726,7 +614,7 @@ class MediaDiscovery(_PluginBase):
             if movie_resp:
                 movie_data = json.loads(movie_resp)
                 for item in movie_data.get("results", [])[:50]:
-                    anime_list.append({"title": item.get("title", ""), "year": str(item.get("release_date", "")[:4]) if item.get("release_date") else "", "air_date": item.get("release_date", ""), "season": "", "rating": round(item.get("vote_average", 0), 1), "poster": f"https://image.tmdb.org/t/p/w300{item.get('poster_path', '')}" if item.get("poster_path") else "", "overview": item.get("overview", ""), "tmdb_id": item.get("id", ""), "media_type": "movie", "subscribed": False})
+                    anime_list.append({"title": item.get("title", ""), "year": str(item.get("release_date", "")[:4]) if item.get("release_date") else "", "air_date": item.get("release_date", ""), "season": "", "rating": round(item.get("vote_average", 0), 1), "poster": f"https://image.tmdb.org/t/p/w300{item.get('poster_path', '')}" if item.get("poster_path") else "", "overview": item.get("overview", ""), "tmdb_id": item.get("id", ""), "popularity": round(item.get("popularity", 0) or 0, 2), "media_type": "movie", "subscribed": False})
         except Exception as e:
             logger.error(f"TMDB 请求失败: {e}")
         return anime_list
@@ -1122,6 +1010,7 @@ class MediaDiscovery(_PluginBase):
                     "poster": poster,
                     "overview": overview or f"{source_label} · {getattr(item, 'title', '')}",
                     "tmdb_id": getattr(item, 'tmdb_id', '') or "",
+                    "popularity": rating,
                     "douban_id": getattr(item, 'douban_id', '') or "",
                     "media_type": media_type,
                     "subscribed": False,
@@ -1157,7 +1046,7 @@ class MediaDiscovery(_PluginBase):
         return anime_list
 
     def _fetch_hot_movies(self) -> List[Dict[str, Any]]:
-        """从 TMDB 获取热门真人影视（TV + 电影，排除动画）。"""
+        """从 TMDB 获取热门影视（TV + 电影，排除动画）。"""
         anime_list = []
         try:
             now = datetime.now()
@@ -1174,7 +1063,7 @@ class MediaDiscovery(_PluginBase):
                 tv_data = json.loads(tv_resp)
                 sl = self._get_season_label()
                 for item in tv_data.get("results", [])[:50]:
-                    anime_list.append({"title": item.get("name", ""), "year": str(item.get("first_air_date", "")[:4]) if item.get("first_air_date") else "", "air_date": item.get("first_air_date", ""), "season": sl, "rating": round(item.get("vote_average", 0), 1), "poster": f"https://image.tmdb.org/t/p/w300{item.get('poster_path', '')}" if item.get("poster_path") else "", "overview": item.get("overview", ""), "tmdb_id": item.get("id", ""), "media_type": "tv", "subscribed": False})
+                    anime_list.append({"title": item.get("name", ""), "year": str(item.get("first_air_date", "")[:4]) if item.get("first_air_date") else "", "air_date": item.get("first_air_date", ""), "season": sl, "rating": round(item.get("vote_average", 0), 1), "poster": f"https://image.tmdb.org/t/p/w300{item.get('poster_path', '')}" if item.get("poster_path") else "", "overview": item.get("overview", ""), "tmdb_id": item.get("id", ""), "popularity": round(item.get("popularity", 0) or 0, 2), "media_type": "tv", "subscribed": False})
 
             # 电影：当季上映，按上映日期排序
             mov_gte, mov_lte = self._get_season_range()
@@ -1185,7 +1074,7 @@ class MediaDiscovery(_PluginBase):
             if movie_resp:
                 movie_data = json.loads(movie_resp)
                 for item in movie_data.get("results", [])[:50]:
-                    anime_list.append({"title": item.get("title", ""), "year": str(item.get("release_date", "")[:4]) if item.get("release_date") else "", "air_date": item.get("release_date", ""), "season": "", "rating": round(item.get("vote_average", 0), 1), "poster": f"https://image.tmdb.org/t/p/w300{item.get('poster_path', '')}" if item.get("poster_path") else "", "overview": item.get("overview", ""), "tmdb_id": item.get("id", ""), "media_type": "movie", "subscribed": False})
+                    anime_list.append({"title": item.get("title", ""), "year": str(item.get("release_date", "")[:4]) if item.get("release_date") else "", "air_date": item.get("release_date", ""), "season": "", "rating": round(item.get("vote_average", 0), 1), "poster": f"https://image.tmdb.org/t/p/w300{item.get('poster_path', '')}" if item.get("poster_path") else "", "overview": item.get("overview", ""), "tmdb_id": item.get("id", ""), "popularity": round(item.get("popularity", 0) or 0, 2), "media_type": "movie", "subscribed": False})
         except Exception as e:
             logger.error(f"TMDB 热门影视请求失败: {e}")
         return anime_list
