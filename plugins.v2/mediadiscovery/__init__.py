@@ -45,7 +45,7 @@ class MediaDiscovery(_PluginBase):
     plugin_name = "当季新番与热门影视"
     plugin_desc = "发现当季新番和热门影视，支持多数据源，按日期分组，一键订阅追剧。"
     plugin_icon = "mdi-play-circle"
-    plugin_version = "1.1.0"
+    plugin_version = "1.2.0"
     plugin_label = "订阅"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "media_discovery_"
@@ -175,7 +175,9 @@ class MediaDiscovery(_PluginBase):
                         {"component": "VSelect", "props": {
                             "model": "movies_source", "label": "影视数据源",
                             "items": [
-                                {"title": "TMDB 热门真人影视（推荐）", "value": "tmdb_hot"},
+                                {"title": "自动整合（TMDB+豆瓣）", "value": "auto"},
+                                {"title": "TMDB 热门真人影视", "value": "tmdb_hot"},
+                                {"title": "豆瓣热榜（TV+电影）", "value": "douban_hot"},
                             ],
                             "hint": "影视视图使用（真人剧集+电影，排除动画）",
                             "persistent-hint": True,
@@ -205,7 +207,7 @@ class MediaDiscovery(_PluginBase):
         ], {
             "enabled": False,
             "anime_source": "auto",
-            "movies_source": "tmdb_hot",
+            "movies_source": "auto",
             "min_rating": 0.0,
             "min_year": 0,
             "auto_refresh": "",
@@ -584,7 +586,13 @@ class MediaDiscovery(_PluginBase):
 
         # 根据当前视图选择数据源
         if self._current_view == "movies":
-            anime_list = self._fetch_hot_movies()
+            # 影视视图
+            if self._movies_source == "auto":
+                anime_list = self._fetch_movies_auto()
+            elif self._movies_source == "douban_hot":
+                anime_list = self._fetch_douban()
+            else:
+                anime_list = self._fetch_hot_movies()
         else:
             # 番剧视图
             if self._anime_source == "auto":
@@ -862,6 +870,291 @@ class MediaDiscovery(_PluginBase):
         return anime_list
 
     # ==================== 影视数据源 ====================
+
+    def _fetch_movies_auto(self) -> List[Dict[str, Any]]:
+        """自动整合多个影视数据源：TMDB + 豆瓣 + TVDB。"""
+        tmdb_list = self._fetch_hot_movies()
+        douban_list = self._fetch_douban()
+        tvdb_list = self._fetch_tvdb()
+
+        merged: Dict[str, Dict[str, Any]] = {}
+
+        # TMDB 优先（数据最全）
+        for a in tmdb_list:
+            k = a.get("title", "").lower().strip()
+            if k:
+                merged[k] = a
+
+        # 豆瓣补充（有 tmdb_id 的优先，否则标题匹配）
+        for a in douban_list:
+            k = a.get("title", "").lower().strip()
+            if not k:
+                continue
+            if k in merged:
+                # 已有条目，补充豆瓣评分（如果 TMDB 评分缺失）
+                if not merged[k].get("rating") and a.get("rating"):
+                    merged[k]["rating"] = a["rating"]
+            else:
+                # 新条目
+                if a.get("tmdb_id"):
+                    merged[k] = a
+                else:
+                    # 尝试用标题匹配 TMDB（已在上面处理）
+                    merged[k] = a
+
+        # TVDB 补充（同理）
+        for a in tvdb_list:
+            k = a.get("title", "").lower().strip()
+            if not k:
+                continue
+            if k in merged:
+                if not merged[k].get("rating") and a.get("rating"):
+                    merged[k]["rating"] = a["rating"]
+            else:
+                merged[k] = a
+
+        logger.info(f"影视自动整合: TMDB={len(tmdb_list)}, 豆瓣={len(douban_list)}, TVDB={len(tvdb_list)} → {len(merged)}")
+        return list(merged.values())
+
+    def _fetch_douban(self) -> List[Dict[str, Any]]:
+        """从豆瓣获取热门影视（解析公开页面）。"""
+        anime_list = []
+        try:
+            ru = RequestUtils(proxies=settings.PROXY)
+            # 豆瓣电影热榜
+            movie_url = "https://movie.douban.com/j/search_subjects?type=movie&tag=热门&page_limit=30&page_start=0"
+            movie_resp = ru.get(movie_url, timeout=30)
+            if movie_resp:
+                try:
+                    movie_data = json.loads(movie_resp)
+                    for item in movie_data.get("subjects", [])[:30]:
+                        title = item.get("title", "")
+                        rate = item.get("rate", "")
+                        rating = float(rate) if rate and rate != "" else 0
+                        anime_list.append({
+                            "title": title,
+                            "year": "",
+                            "air_date": "",
+                            "season": "",
+                            "rating": rating,
+                            "poster": item.get("cover", ""),
+                            "overview": "",
+                            "tmdb_id": "",
+                            "bangumi_id": "",
+                            "douban_id": str(item.get("id", "")),
+                            "media_type": "movie",
+                            "subscribed": False,
+                        })
+                except Exception as e:
+                    logger.warning(f"解析豆瓣电影失败: {e}")
+
+            # 豆瓣剧集热榜
+            tv_url = "https://movie.douban.com/j/search_subjects?type=tv&tag=热门&page_limit=30&page_start=0"
+            tv_resp = ru.get(tv_url, timeout=30)
+            if tv_resp:
+                try:
+                    tv_data = json.loads(tv_resp)
+                    for item in tv_data.get("subjects", [])[:30]:
+                        title = item.get("title", "")
+                        rate = item.get("rate", "")
+                        rating = float(rate) if rate and rate != "" else 0
+                        anime_list.append({
+                            "title": title,
+                            "year": "",
+                            "air_date": "",
+                            "season": self._get_season_label(),
+                            "rating": rating,
+                            "poster": item.get("cover", ""),
+                            "overview": "",
+                            "tmdb_id": "",
+                            "bangumi_id": "",
+                            "douban_id": str(item.get("id", "")),
+                            "media_type": "tv",
+                            "subscribed": False,
+                        })
+                except Exception as e:
+                    logger.warning(f"解析豆瓣剧集失败: {e}")
+        except Exception as e:
+            logger.error(f"豆瓣请求失败: {e}")
+        return anime_list
+
+    def _fetch_tvdb(self) -> List[Dict[str, Any]]:
+        """从 TVDB 获取流行影视（需配置 API Key）。"""
+        anime_list = []
+        try:
+            tvdb_key = getattr(settings, 'TVDB_API_KEY', '')
+            if not tvdb_key:
+                logger.warning("TVDB API Key 未配置，跳过 TVDB 数据源")
+                return []
+
+            ru = RequestUtils(proxies=settings.PROXY)
+            # TVDB v4 API（需 Bearer token）
+            # 1. 获取 token
+            auth_url = "https://api4.thetvdb.com/v4/login"
+            auth_payload = {"apikey": tvdb_key}
+            auth_resp = ru.post(auth_url, json=auth_payload, timeout=30)
+            if not auth_resp:
+                logger.warning("TVDB 登录失败")
+                return []
+
+            try:
+                auth_data = json.loads(auth_resp)
+                token = auth_data.get("data", {}).get("token", "")
+                if not token:
+                    logger.warning("TVDB token 获取失败")
+                    return []
+            except Exception as e:
+                logger.warning(f"解析 TVDB 登录响应失败: {e}")
+                return []
+
+            # 2. 获取流行剧集
+            headers = {"Authorization": f"Bearer {token}"}
+            tv_url = "https://api4.thetvdb.com/v4/lists/310/popular?page=0"
+            tv_resp = ru.get(tv_url, headers=headers, timeout=30)
+            if tv_resp:
+                try:
+                    tv_data = json.loads(tv_resp)
+                    for item in tv_data.get("data", {}).get("objects", [])[:30]:
+                        tvdb_id = item.get("id", "")
+                        name = item.get("name", "")
+                        year = item.get("year", "")
+                        image = item.get("image_url", "")
+                        anime_list.append({
+                            "title": name,
+                            "year": str(year) if year else "",
+                            "air_date": "",
+                            "season": self._get_season_label(),
+                            "rating": 0,
+                            "poster": image,
+                            "overview": "",
+                            "tmdb_id": "",
+                            "tvdb_id": str(tvdb_id),
+                            "media_type": "tv",
+                            "subscribed": False,
+                        })
+                except Exception as e:
+                    logger.warning(f"解析 TVDB 剧集失败: {e}")
+
+            # 3. 获取流行电影
+            movie_url = "https://api4.thetvdb.com/v4/lists/334/popular?page=0"
+            movie_resp = ru.get(movie_url, headers=headers, timeout=30)
+            if movie_resp:
+                try:
+                    movie_data = json.loads(movie_resp)
+                    for item in movie_data.get("data", {}).get("objects", [])[:30]:
+                        tvdb_id = item.get("id", "")
+                        name = item.get("name", "")
+                        year = item.get("year", "")
+                        image = item.get("image_url", "")
+                        anime_list.append({
+                            "title": name,
+                            "year": str(year) if year else "",
+                            "air_date": "",
+                            "season": "",
+                            "rating": 0,
+                            "poster": image,
+                            "overview": "",
+                            "tmdb_id": "",
+                            "tvdb_id": str(tvdb_id),
+                            "media_type": "movie",
+                            "subscribed": False,
+                        })
+                except Exception as e:
+                    logger.warning(f"解析 TVDB 电影失败: {e}")
+        except Exception as e:
+            logger.error(f"TVDB 请求失败: {e}")
+        return anime_list
+
+    def _fetch_movies_auto(self) -> List[Dict[str, Any]]:
+        """影视自动整合：TMDB + 豆瓣热榜，按标题去重合并。"""
+        tmdb_list = self._fetch_hot_movies()
+        douban_list = self._fetch_douban()
+        merged: Dict[str, Dict[str, Any]] = {}
+        # TMDB 优先
+        for a in tmdb_list:
+            k = a.get("title", "").lower().strip()
+            if k:
+                merged[k] = a
+        # 豆瓣补充
+        for a in douban_list:
+            k = a.get("title", "").lower().strip()
+            if not k:
+                continue
+            if k not in merged:
+                merged[k] = a
+        logger.info(f"影视自动整合: TMDB={len(tmdb_list)}, 豆瓣={len(douban_list)} → {len(merged)}")
+        return list(merged.values())
+
+    def _fetch_douban(self) -> List[Dict[str, Any]]:
+        """从豆瓣获取热榜（TV热榜 + 电影热榜 + 正在热映）。"""
+        anime_list: List[Dict[str, Any]] = []
+        try:
+            from app.modules.douban import DoubanModule
+            douban = DoubanModule()
+            douban.init_module()
+
+            def _parse_douban_item(item, media_type, source_label):
+                """解析豆瓣 MediaInfo 为插件统一格式。"""
+                douban_info = getattr(item, 'douban_info', {}) or {}
+                rating = 0
+                poster = ""
+                overview = ""
+                try:
+                    rating_data = douban_info.get('rating') or {}
+                    rating = round(float(rating_data.get('value', 0) or 0), 1)
+                except Exception:
+                    pass
+                try:
+                    pic = douban_info.get('pic') or {}
+                    poster = pic.get('large') or pic.get('normal') or getattr(item, 'poster_path', '') or ""
+                except Exception:
+                    poster = getattr(item, 'poster_path', '') or ""
+                try:
+                    overview = douban_info.get('comment', '')[:100] or getattr(item, 'overview', '')[:100]
+                except Exception:
+                    overview = ""
+                return {
+                    "title": getattr(item, 'title', '') or "",
+                    "year": str(getattr(item, 'year', '') or ""),
+                    "air_date": "",
+                    "season": "",
+                    "rating": rating,
+                    "poster": poster,
+                    "overview": overview or f"{source_label} · {getattr(item, 'title', '')}",
+                    "tmdb_id": getattr(item, 'tmdb_id', '') or "",
+                    "douban_id": getattr(item, 'douban_id', '') or "",
+                    "media_type": media_type,
+                    "subscribed": False,
+                }
+
+            # 豆瓣TV热榜
+            try:
+                tv_items = douban.tv_hot(page=1, count=30)
+                for item in (tv_items or []):
+                    anime_list.append(_parse_douban_item(item, "tv", "豆瓣TV热榜"))
+            except Exception as e:
+                logger.warning(f"豆瓣TV热榜获取失败: {e}")
+
+            # 豆瓣电影热榜
+            try:
+                movie_items = douban.movie_hot(page=1, count=30)
+                for item in (movie_items or []):
+                    anime_list.append(_parse_douban_item(item, "movie", "豆瓣电影热榜"))
+            except Exception as e:
+                logger.warning(f"豆瓣电影热榜获取失败: {e}")
+
+            # 正在热映
+            try:
+                showing_items = douban.movie_showing(page=1, count=20)
+                for item in (showing_items or []):
+                    anime_list.append(_parse_douban_item(item, "movie", "正在热映"))
+            except Exception as e:
+                logger.warning(f"正在热映获取失败: {e}")
+
+            logger.info(f"豆瓣热榜: TV+电影+热映 共 {len(anime_list)} 条")
+        except Exception as e:
+            logger.error(f"豆瓣模块初始化失败: {e}")
+        return anime_list
 
     def _fetch_hot_movies(self) -> List[Dict[str, Any]]:
         """从 TMDB 获取热门真人影视（TV + 电影，排除动画）。"""
