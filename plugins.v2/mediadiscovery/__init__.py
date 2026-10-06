@@ -45,7 +45,7 @@ class MediaDiscovery(_PluginBase):
     plugin_name = "当季新番与热门影视"
     plugin_desc = "发现当季新番和热门影视，支持多数据源，按日期分组，一键订阅追剧。"
     plugin_icon = "mdi-play-circle"
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     plugin_label = "订阅"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "media_discovery_"
@@ -72,6 +72,8 @@ class MediaDiscovery(_PluginBase):
     def init_plugin(self, config: dict = None) -> None:
         """根据插件配置初始化运行状态。"""
         self.stop_service()
+        old_view_mode = self._view_mode
+        old_data_source = self._data_source
         self._enabled = False
         self._view_mode = "anime"
         self._data_source = "auto"
@@ -91,6 +93,12 @@ class MediaDiscovery(_PluginBase):
         self._min_year = int(config.get("min_year") or 0)
         self._auto_refresh = str(config.get("auto_refresh") or "")
         self._notify_new = bool(config.get("notify_new"))
+
+        # 视图模式或数据源变化时清除缓存，避免切换后显示旧数据
+        if old_view_mode != self._view_mode or old_data_source != self._data_source:
+            self._cache = {}
+            self._cache_time = 0
+            logger.info(f"视图/数据源切换: {old_view_mode}:{old_data_source} -> {self._view_mode}:{self._data_source}，已清除缓存")
 
         # 从持久化数据恢复上次通知日期
         try:
@@ -556,9 +564,10 @@ class MediaDiscovery(_PluginBase):
     def _get_anime_list(self) -> List[Dict[str, Any]]:
         """获取当前视图的数据列表。"""
         now = time.time()
-        # 如果有缓存且未过期，返回缓存数据，但仍然检查订阅状态
-        if self._cache.get("anime_list") and (now - self._cache_time) < self._cache_ttl:
-            cached_list = self._cache["anime_list"]
+        # 缓存键按视图模式和数据源区分，避免切换后返回旧缓存
+        cache_key = f"{self._view_mode}:{self._data_source}"
+        if self._cache.get(cache_key) and (now - self._cache_time) < self._cache_ttl:
+            cached_list = self._cache[cache_key]
             self._check_subscriptions(cached_list)
             return cached_list
 
@@ -613,7 +622,7 @@ class MediaDiscovery(_PluginBase):
                 self.post_message(mtype=NotificationType.Manual, title=title_text, text=titles)
                 logger.info(f"已推送通知，{len(today_items)}部，时间: {datetime.now()}")
 
-        self._cache["anime_list"] = anime_list
+        self._cache[cache_key] = anime_list
         self._cache_time = now
         return anime_list
 
