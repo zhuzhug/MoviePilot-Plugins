@@ -45,7 +45,7 @@ class MediaDiscovery(_PluginBase):
     plugin_name = "当季新番与热门影视"
     plugin_desc = "发现当季新番和热门影视，支持多数据源，按日期分组，一键订阅追剧。"
     plugin_icon = "mdi-play-circle"
-    plugin_version = "1.0.1"
+    plugin_version = "1.1.0"
     plugin_label = "订阅"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "media_discovery_"
@@ -53,8 +53,9 @@ class MediaDiscovery(_PluginBase):
     auth_level = 1
 
     _enabled = False
-    _view_mode = "anime"  # anime 或 movies
-    _data_source = "auto"
+    _current_view = "anime"  # 当前视图：anime 或 movies（详情页切换按钮控制）
+    _anime_source = "auto"   # 番剧数据源
+    _movies_source = "tmdb_hot"  # 真人影视数据源
     _min_rating = 0.0
     _min_year = 0
     _auto_refresh = ""
@@ -72,11 +73,10 @@ class MediaDiscovery(_PluginBase):
     def init_plugin(self, config: dict = None) -> None:
         """根据插件配置初始化运行状态。"""
         self.stop_service()
-        old_view_mode = self._view_mode
-        old_data_source = self._data_source
         self._enabled = False
-        self._view_mode = "anime"
-        self._data_source = "auto"
+        self._current_view = "anime"
+        self._anime_source = "auto"
+        self._movies_source = "tmdb_hot"
         self._min_rating = 0.0
         self._min_year = 0
         self._auto_refresh = ""
@@ -87,18 +87,20 @@ class MediaDiscovery(_PluginBase):
         if not config:
             return
         self._enabled = bool(config.get("enabled"))
-        self._view_mode = str(config.get("view_mode") or "anime")
-        self._data_source = str(config.get("data_source") or "auto")
+        self._anime_source = str(config.get("anime_source") or "auto")
+        self._movies_source = str(config.get("movies_source") or "tmdb_hot")
         self._min_rating = float(config.get("min_rating") or 0.0)
         self._min_year = int(config.get("min_year") or 0)
         self._auto_refresh = str(config.get("auto_refresh") or "")
         self._notify_new = bool(config.get("notify_new"))
 
-        # 视图模式或数据源变化时清除缓存，避免切换后显示旧数据
-        if old_view_mode != self._view_mode or old_data_source != self._data_source:
-            self._cache = {}
-            self._cache_time = 0
-            logger.info(f"视图/数据源切换: {old_view_mode}:{old_data_source} -> {self._view_mode}:{self._data_source}，已清除缓存")
+        # 恢复上次视图选择
+        try:
+            saved_view = self.get_data("current_view")
+            if saved_view:
+                self._current_view = str(saved_view)
+        except Exception:
+            pass
 
         # 从持久化数据恢复上次通知日期
         try:
@@ -124,6 +126,7 @@ class MediaDiscovery(_PluginBase):
         """返回插件 API 列表。"""
         return [
             {"path": "/refresh", "endpoint": self._refresh_data, "methods": ["GET"], "summary": "刷新数据", "auth": "bear"},
+            {"path": "/switch_view", "endpoint": self._switch_view, "methods": ["POST"], "summary": "切换视图", "auth": "bear"},
             {"path": "/subscribe", "endpoint": self._subscribe_anime, "methods": ["POST"], "summary": "订阅", "auth": "bear"},
             {"path": "/unsubscribe", "endpoint": self._unsubscribe_anime, "methods": ["POST"], "summary": "取消订阅", "auth": "bear"},
             {"path": "/reset_notify", "endpoint": self._reset_notify_date, "methods": ["GET"], "summary": "重置通知日期", "auth": "bear"},
@@ -142,65 +145,54 @@ class MediaDiscovery(_PluginBase):
 
     def get_form(self) -> Tuple[Optional[List[dict]], Dict[str, Any]]:
         """返回插件配置表单与默认配置。"""
-        # 视图模式决定显示哪些数据源选项
-        is_anime_view = self._view_mode == "anime"
-
-        # 番剧数据源选项
-        anime_sources = [
-            {"title": "自动整合（推荐）", "value": "auto"},
-            {"title": "TMDB", "value": "tmdb"},
-            {"title": "Bangumi", "value": "bangumi"},
-            {"title": "蜜柑", "value": "mikan"},
-            {"title": "番组百科", "value": "anibk"},
-            {"title": "番组百科·每日更新", "value": "anibk_daily"},
-        ]
-
-        # 影视数据源选项
-        movies_sources = [
-            {"title": "TMDB 热门真人影视（推荐）", "value": "tmdb_hot"},
-        ]
-
-        data_source_items = anime_sources if is_anime_view else movies_sources
-        data_source_label = "番剧数据源" if is_anime_view else "影视数据源"
-        data_source_hint = "" if is_anime_view else "影视模式下从 TMDB 获取热门真人剧集和电影（排除动画）"
-
         return [
             {"component": "VForm", "content": [
                 {"component": "VRow", "content": [
                     {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
                         {"component": "VSwitch", "props": {"model": "enabled", "label": "启用插件"}}
                     ]},
-                    {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
+                    {"component": "VCol", "props": {"cols": 12, "md": 9}, "content": [
+                        {"component": "div", "props": {"class": "text-body-2 text-grey"}, "text": "详情页顶部可切换番剧/影视视图，配置页的数据源分别对应两个视图"}
+                    ]},
+                ]},
+                {"component": "VRow", "content": [
+                    {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                         {"component": "VSelect", "props": {
-                            "model": "view_mode", "label": "视图模式",
+                            "model": "anime_source", "label": "番剧数据源",
                             "items": [
-                                {"title": "当季新番（番剧）", "value": "anime"},
-                                {"title": "热门影视（真人）", "value": "movies"},
+                                {"title": "自动整合（推荐）", "value": "auto"},
+                                {"title": "TMDB 动画", "value": "tmdb"},
+                                {"title": "Bangumi", "value": "bangumi"},
+                                {"title": "蜜柑", "value": "mikan"},
+                                {"title": "番组百科", "value": "anibk"},
+                                {"title": "番组百科·每日更新", "value": "anibk_daily"},
                             ],
-                            "hint": "切换番剧/影视视图",
+                            "hint": "番剧视图使用",
                             "persistent-hint": True,
                         }}
                     ]},
-                    {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
+                    {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
                         {"component": "VSelect", "props": {
-                            "model": "data_source", "label": data_source_label,
-                            "items": data_source_items,
-                            "hint": data_source_hint,
-                            "persistent-hint": bool(data_source_hint),
+                            "model": "movies_source", "label": "影视数据源",
+                            "items": [
+                                {"title": "TMDB 热门真人影视（推荐）", "value": "tmdb_hot"},
+                            ],
+                            "hint": "影视视图使用（真人剧集+电影，排除动画）",
+                            "persistent-hint": True,
                         }}
-                    ]},
-                    {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
-                        {"component": "VTextField", "props": {"model": "min_rating", "label": "最低评分", "type": "number", "hint": "0=全部"}},
                     ]},
                 ]},
                 {"component": "VRow", "content": [
                     {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
+                        {"component": "VTextField", "props": {"model": "min_rating", "label": "最低评分", "type": "number", "hint": "0=全部"}},
+                    ]},
+                    {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
                         {"component": "VTextField", "props": {"model": "min_year", "label": "最早年份", "type": "number", "hint": "0=全部，如2010"}},
                     ]},
-                    {"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [
+                    {"component": "VCol", "props": {"cols": 12, "md": 3}, "content": [
                         {"component": "VTextField", "props": {
                             "model": "auto_refresh", "label": "自动刷新 Cron 表达式",
-                            "hint": "留空=关闭。示例: 0 10 * * * (每天10点), 0 */6 * * * (每6小时), 0 8,20 * * * (每天8点和20点)",
+                            "hint": "留空=关闭。示例: 0 10 * * * (每天10点), 0 */6 * * * (每6小时)",
                             "placeholder": "0 10 * * *",
                             "density": "compact", "hide-details": False,
                         }},
@@ -212,8 +204,8 @@ class MediaDiscovery(_PluginBase):
             ]}
         ], {
             "enabled": False,
-            "view_mode": "anime",
-            "data_source": "auto",
+            "anime_source": "auto",
+            "movies_source": "tmdb_hot",
             "min_rating": 0.0,
             "min_year": 0,
             "auto_refresh": "",
@@ -313,19 +305,38 @@ class MediaDiscovery(_PluginBase):
         movie_count = len(movie_list)
         sub_count = sum(1 for a in data if a.get("subscribed"))
 
-        # 标题标签
-        is_anime_view = self._view_mode == "anime"
-        tv_label = "TV动画" if is_anime_view else "TV"
-        tv_label_long = "TV动画" if is_anime_view else "TV剧集"
+        is_anime_view = self._current_view == "anime"
 
         page = [
+            # 视图切换按钮组
+            {"component": "VRow", "props": {"class": "mb-3"}, "content": [
+                {"component": "VCol", "props": {"cols": 12}, "content": [
+                    {"component": "div", "props": {"class": "d-flex align-center"}, "content": [
+                        {"component": "VBtn", "props": {
+                            "color": "primary" if is_anime_view else "grey",
+                            "variant": "tonal" if is_anime_view else "outlined",
+                            "class": "mr-2",
+                            "prepend-icon": "mdi-play-circle",
+                        }, "text": "番剧",
+                         "events": {"click": {"api": f"plugin/MediaDiscovery/switch_view?apikey={api_token}", "method": "post", "params": {"view": "anime"}}}},
+                        {"component": "VBtn", "props": {
+                            "color": "orange" if not is_anime_view else "grey",
+                            "variant": "tonal" if not is_anime_view else "outlined",
+                            "class": "mr-2",
+                            "prepend-icon": "mdi-movie-open",
+                        }, "text": "热门影视",
+                         "events": {"click": {"api": f"plugin/MediaDiscovery/switch_view?apikey={api_token}", "method": "post", "params": {"view": "movies"}}}},
+                        {"component": "VChip", "props": {"color": is_anime_view and "primary" or "orange", "variant": "flat", "size": "small"}, "text": f"当前: {'番剧' if is_anime_view else '热门影视'}"},
+                    ]},
+                ]},
+            ]},
             # 统计
             {"component": "VRow", "props": {"class": "mb-2"}, "content": [
                 {"component": "VCol", "props": {"cols": 3}, "content": [
                     {"component": "VCard", "props": {"variant": "tonal", "color": "primary"}, "content": [
                         {"component": "VCardText", "props": {"class": "text-center py-2"}, "content": [
                             {"component": "div", "props": {"class": "text-h5 font-weight-bold"}, "text": str(tv_count)},
-                            {"component": "div", "props": {"class": "text-caption"}, "text": tv_label},
+                            {"component": "div", "props": {"class": "text-caption"}, "text": "TV动画" if is_anime_view else "TV剧集"},
                         ]},
                     ]},
                 ]},
@@ -370,16 +381,16 @@ class MediaDiscovery(_PluginBase):
         ]
 
         # 渲染TV分组
-        logger.info(f"TV分组: dated={len(tv_dated)}, undated={len(tv_undated)}, total={tv_count}")
+        logger.info(f"TV分组: dated={len(tv_dated)}, undated={len(tv_undated)}, total={tv_count}, view={self._current_view}")
         if tv_dated or tv_undated:
             page.append({"component": "div", "props": {"class": "d-flex align-center mb-1 mt-2"}, "content": [
-                {"component": "VChip", "props": {"color": "primary", "variant": "flat", "size": "small", "class": "mr-2"}, "text": tv_label_long},
+                {"component": "VChip", "props": {"color": "primary", "variant": "flat", "size": "small", "class": "mr-2"}, "text": "TV动画" if is_anime_view else "TV剧集"},
                 {"component": "div", "props": {"class": "text-caption text-grey"}, "text": f"{tv_count} 部"},
             ]})
 
             # 按星期分组
             for dk, animes in tv_dated.items():
-                logger.info(f"{tv_label_long}星期分组: {dk}, 数量={len(animes)}, 标题: {[a.get('title') for a in animes[:5]]}")
+                logger.info(f"TV星期分组: {dk}, 数量={len(animes)}, 标题: {[a.get('title') for a in animes[:5]]}")
                 page.append({"component": "div", "props": {"class": "d-flex align-center mb-1 mt-2"}, "content": [
                     {"component": "VChip", "props": {"color": "blue", "variant": "outlined", "size": "x-small", "class": "mr-2"}, "text": dk},
                     {"component": "div", "props": {"class": "text-caption text-grey"}, "text": f"{len(animes)} 部"},
@@ -564,27 +575,27 @@ class MediaDiscovery(_PluginBase):
     def _get_anime_list(self) -> List[Dict[str, Any]]:
         """获取当前视图的数据列表。"""
         now = time.time()
-        # 缓存键按视图模式和数据源区分，避免切换后返回旧缓存
-        cache_key = f"{self._view_mode}:{self._data_source}"
+        # 缓存键按视图模式和对应数据源区分
+        cache_key = f"{self._current_view}:{self._anime_source if self._current_view == 'anime' else self._movies_source}"
         if self._cache.get(cache_key) and (now - self._cache_time) < self._cache_ttl:
             cached_list = self._cache[cache_key]
             self._check_subscriptions(cached_list)
             return cached_list
 
-        # 根据视图模式选择数据源
-        if self._view_mode == "movies":
+        # 根据当前视图选择数据源
+        if self._current_view == "movies":
             anime_list = self._fetch_hot_movies()
         else:
             # 番剧视图
-            if self._data_source == "auto":
+            if self._anime_source == "auto":
                 anime_list = self._fetch_auto()
-            elif self._data_source == "mikan":
+            elif self._anime_source == "mikan":
                 anime_list = self._fetch_mikan()
-            elif self._data_source == "bangumi":
+            elif self._anime_source == "bangumi":
                 anime_list = self._fetch_bangumi()
-            elif self._data_source == "anibk":
+            elif self._anime_source == "anibk":
                 anime_list = self._fetch_anibk()
-            elif self._data_source == "anibk_daily":
+            elif self._anime_source == "anibk_daily":
                 anime_list = self._fetch_anibk_daily()
             else:
                 anime_list = self._fetch_tmdb()
@@ -613,14 +624,14 @@ class MediaDiscovery(_PluginBase):
                 if today_items:
                     today_items.sort(key=lambda a: a.get("rating", 0), reverse=True)
                     titles = "\n".join([f"· {a.get('title')} ★{a.get('rating', 0)}" for a in today_items[:20]])
-                    label = "热门影视" if self._view_mode == "movies" else "新番"
+                    label = "热门影视" if self._current_view == "movies" else "新番"
                     title_text = f"[{label}] 今日更新 ({len(today_items)}部)"
                 else:
                     titles = "今日暂无更新"
                     title_text = "[当季新番与热门影视] 今日更新 (0部)"
 
                 self.post_message(mtype=NotificationType.Manual, title=title_text, text=titles)
-                logger.info(f"已推送通知，{len(today_items)}部，时间: {datetime.now()}")
+                logger.info(f"已推送通知，{len(today_items)}部，视图: {self._current_view}，时间: {datetime.now()}")
 
         self._cache[cache_key] = anime_list
         self._cache_time = now
@@ -1013,10 +1024,34 @@ class MediaDiscovery(_PluginBase):
 
         try:
             data = self._get_anime_list()
-            logger.info(f"数据刷新完成，共 {len(data or [])} 条记录")
+            logger.info(f"数据刷新完成，视图: {self._current_view}，共 {len(data or [])} 条记录")
             return {"success": True, "count": len(data or [])}
         except Exception as e:
             logger.error(f"数据刷新失败: {e}")
+            return {"success": False, "message": str(e)}
+
+    def _switch_view(self, params: dict = None) -> dict:
+        """切换番剧/影视视图（由详情页切换按钮调用）。"""
+        try:
+            new_view = params.get("view") if params else None
+            if new_view not in ("anime", "movies"):
+                return {"success": False, "message": "无效的视图模式"}
+
+            old_view = self._current_view
+            self._current_view = new_view
+
+            # 持久化视图选择
+            self.save_data("current_view", new_view)
+
+            # 清除当前视图的缓存（切换后立即显示对应视图数据）
+            cache_key = f"{new_view}:{self._anime_source if new_view == 'anime' else self._movies_source}"
+            if cache_key in self._cache:
+                del self._cache[cache_key]
+
+            logger.info(f"视图切换: {old_view} -> {new_view}，已清除对应缓存")
+            return {"success": True, "message": f"已切换到{'番剧' if new_view == 'anime' else '热门影视'}视图", "view": new_view}
+        except Exception as e:
+            logger.error(f"切换视图失败: {e}")
             return {"success": False, "message": str(e)}
 
     def _scheduled_refresh(self):
