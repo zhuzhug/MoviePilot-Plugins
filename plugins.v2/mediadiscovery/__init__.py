@@ -45,7 +45,7 @@ class MediaDiscovery(_PluginBase):
     plugin_name = "当季新番与热门影视"
     plugin_desc = "发现当季新番和热门影视，支持多数据源，按日期分组，一键订阅追剧。"
     plugin_icon = "mdi-play-circle"
-    plugin_version = "1.3.1"
+    plugin_version = "1.3.2"
     plugin_label = "订阅"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "media_discovery_"
@@ -1240,7 +1240,7 @@ class MediaDiscovery(_PluginBase):
 
     def _refresh_data(self) -> dict:
         """清除缓存并重新获取数据。"""
-        self._cache = {}
+        self._cache.clear()
         self._cache_time = 0
         self._loading = False
         try:
@@ -1282,7 +1282,7 @@ class MediaDiscovery(_PluginBase):
 
     def _scheduled_refresh(self):
         """定时刷新（由调度器调用）。"""
-        self._cache = {}; self._cache_time = 0
+        self._cache.clear(); self._cache_time = 0
         self._get_anime_list()
 
     def _subscribe_anime(self, params: SubscribeParams) -> dict:
@@ -1323,7 +1323,7 @@ class MediaDiscovery(_PluginBase):
             )
             logger.info(f"订阅结果: sid={sid}, msg={msg}")
             if sid:
-                self._cache = {}; self._cache_time = 0
+                self._cache.clear(); self._cache_time = 0
                 self._save_mikan_map(mikan_id, sid)
                 season_info = f" 第{season}季" if season else ""
                 return {"success": True, "message": f"已订阅 {title}{season_info}，{msg}"}
@@ -1367,7 +1367,7 @@ class MediaDiscovery(_PluginBase):
                                     message=True,
                                 )
                                 if sid2:
-                                    self._cache = {}; self._cache_time = 0
+                                    self._cache.clear(); self._cache_time = 0
                                     self._save_mikan_map(mikan_id, sid2)
                                     season_info = f" 第{fallback_season}季" if fallback_season else ""
                                     return {"success": True, "message": f"已订阅 {title}{season_info}（通过TMDB搜索匹配），{msg2}"}
@@ -1459,7 +1459,7 @@ class MediaDiscovery(_PluginBase):
                     deleted = db.query(Subscribe).filter(Subscribe.name == title).delete()
                 db.commit()
                 if deleted:
-                    self._cache = {}; self._cache_time = 0
+                    self._cache.clear(); self._cache_time = 0
                     if params.mikan_id:
                         try:
                             mikan_map = self.get_data("mikan_subscription_map") or {}
