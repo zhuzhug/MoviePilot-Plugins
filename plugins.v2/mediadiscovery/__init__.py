@@ -45,7 +45,7 @@ class MediaDiscovery(_PluginBase):
     plugin_name = "当季新番与热门影视"
     plugin_desc = "发现当季新番和热门影视，支持多数据源，按日期分组，一键订阅追剧。"
     plugin_icon = "mdi-play-circle"
-    plugin_version = "1.3.2"
+    plugin_version = "1.3.3"
     plugin_label = "订阅"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "media_discovery_"
@@ -638,10 +638,10 @@ class MediaDiscovery(_PluginBase):
             tv_gte, tv_lte = self._get_season_range()
             ru = RequestUtils(proxies=settings.PROXY)
 
-            # 查询当季TV动画（只含动画类型，genre 16）
-            tv_params = {"api_key": settings.TMDB_API_KEY, "language": "zh-CN", "with_genres": "16",
+            # 查询当季TV动画（只含动画类型，genre 16，日语原声）
+            tv_params = {"api_key": settings.TMDB_API_KEY, "language": "zh-CN", "with_genres": "16", "with_original_language": "ja",
                          "first_air_date.gte": tv_gte, "first_air_date.lte": tv_lte,
-                         "sort_by": "first_air_date.desc", "page": 1}
+                         "sort_by": "popularity.desc", "page": 1}
             tv_resp = ru.get("https://api.themoviedb.org/3/discover/tv", params=tv_params, timeout=30)
             if tv_resp:
                 tv_data = json.loads(tv_resp)
@@ -649,11 +649,11 @@ class MediaDiscovery(_PluginBase):
                 for item in tv_data.get("results", [])[:50]:
                     anime_list.append({"title": item.get("name", ""), "year": str(item.get("first_air_date", "")[:4]) if item.get("first_air_date") else "", "air_date": item.get("first_air_date", ""), "season": sl, "rating": round(item.get("vote_average", 0), 1), "poster": f"https://image.tmdb.org/t/p/w300{item.get('poster_path', '')}" if item.get("poster_path") else "", "overview": item.get("overview", ""), "tmdb_id": item.get("id", ""), "popularity": round(item.get("popularity", 0) or 0, 2), "media_type": "tv", "subscribed": False})
 
-            # 查询当季动画电影（genre 16 且是 movie）
+            # 查询当季动画电影（genre 16 且是 movie，日语原声）
             mov_gte, mov_lte = self._get_season_range()
-            movie_params = {"api_key": settings.TMDB_API_KEY, "language": "zh-CN", "with_genres": "16",
+            movie_params = {"api_key": settings.TMDB_API_KEY, "language": "zh-CN", "with_genres": "16", "with_original_language": "ja",
                             "release_date.gte": mov_gte, "release_date.lte": mov_lte,
-                            "sort_by": "release_date.desc", "page": 1}
+                            "sort_by": "popularity.desc", "page": 1}
             movie_resp = ru.get("https://api.themoviedb.org/3/discover/movie", params=movie_params, timeout=30)
             if movie_resp:
                 movie_data = json.loads(movie_resp)
