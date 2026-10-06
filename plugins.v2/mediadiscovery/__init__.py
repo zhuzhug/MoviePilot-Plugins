@@ -3,7 +3,7 @@
 
 合并「当季新番」与「热门TV与电影」：
 - 番剧视图：TMDB / Bangumi / 蜜柑 / 番组百科 / 每日更新 多源整合，按星期分组
-- 影视视图：TMDB 热门影视（排除动画），TV 按热度排序，电影按热度排序
+- 影视视图：TMDB 热门影视（排除动画），TV 按星期分组，电影按年月分组，组内热度排序
 - 统一订阅：自动识别最新季，避免重复订阅
 """
 
@@ -45,7 +45,7 @@ class MediaDiscovery(_PluginBase):
     plugin_name = "当季新番与热门影视"
     plugin_desc = "发现当季新番和热门影视，支持多数据源，按日期分组，一键订阅追剧。"
     plugin_icon = "mdi-play-circle"
-    plugin_version = "1.3.0"
+    plugin_version = "1.3.1"
     plugin_label = "订阅"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "media_discovery_"
@@ -249,7 +249,6 @@ class MediaDiscovery(_PluginBase):
             data = [a for a in data if not a.get("subscribed")]
 
         is_anime_view = self._current_view == "anime"
-        from collections import OrderedDict
         # 按热度/评分降序排列（TMDB 用 popularity，豆瓣用 rating）
         data_sorted = sorted(
             data,
@@ -265,20 +264,41 @@ class MediaDiscovery(_PluginBase):
         movie_count = len(movie_list)
         sub_count = sum(1 for a in data_sorted if a.get("subscribed"))
 
+        # TV 按星期分组（组内已按热度排序，高热度在前）
+        weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+        tv_dated: Dict[str, List[Dict[str, Any]]] = {}
+        tv_undated: List[Dict[str, Any]] = []
+        for anime in tv_list:
+            ad = anime.get("air_date", "")
+            try:
+                dt = datetime.strptime(ad, "%Y-%m-%d")
+                tv_dated.setdefault(weekdays[dt.weekday()], []).append(anime)
+            except Exception:
+                tv_undated.append(anime)
+
+        # 电影按年月分组（组内已按热度排序，高热度在前）
+        movie_dated: Dict[str, List[Dict[str, Any]]] = {}
+        movie_undated: List[Dict[str, Any]] = []
+        for anime in movie_list:
+            ad = anime.get("air_date", "")
+            try:
+                dt = datetime.strptime(ad, "%Y-%m-%d")
+                movie_dated.setdefault(dt.strftime("%Y年%m月"), []).append(anime)
+            except Exception:
+                movie_undated.append(anime)
+
         def _render_grid(items: List[Dict[str, Any]], visible_count: int, color: str) -> List[dict]:
             """渲染卡片网格：前 visible_count 个直接显示，其余折叠。"""
             cols = [self._build_anime_card(a, api_token) for a in items]
             result: List[dict] = []
             if not cols:
                 return result
-            # 前 visible_count 个直接显示
             for i in range(0, min(visible_count, len(cols)), 2):
                 row_content = []
                 row_content.append({"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i]]})
                 if i + 1 < len(cols) and i + 1 < visible_count:
                     row_content.append({"component": "VCol", "props": {"cols": 12, "md": 6}, "content": [cols[i + 1]]})
                 result.append({"component": "VRow", "props": {"dense": True}, "content": row_content})
-            # 折叠剩余
             if len(cols) > visible_count:
                 expansion_content = []
                 for i in range(visible_count, len(cols), 2):
@@ -295,6 +315,28 @@ class MediaDiscovery(_PluginBase):
                         {"component": "VExpansionPanelText", "props": {"class": "pa-3"}, "content": expansion_content},
                     ]},
                 ]})
+            return result
+
+        def _render_grouped(dated: Dict[str, List[Dict[str, Any]]], undated: List[Dict[str, Any]],
+                            group_order: List[str], group_color: str, group_label: str,
+                            undated_label: str = "其他") -> List[dict]:
+            """渲染分组列表：按组顺序依次渲染，每组内高热度在前。"""
+            result: List[dict] = []
+            for dk in group_order:
+                animes = dated.get(dk)
+                if not animes:
+                    continue
+                result.append({"component": "div", "props": {"class": "d-flex align-center mb-1 mt-2"}, "content": [
+                    {"component": "VChip", "props": {"color": group_color, "variant": "outlined", "size": "x-small", "class": "mr-2"}, "text": dk},
+                    {"component": "div", "props": {"class": "text-caption text-grey"}, "text": f"{len(animes)} 部（热度排序）"},
+                ]})
+                result.extend(_render_grid(animes, 4, group_color))
+            if undated:
+                result.append({"component": "div", "props": {"class": "d-flex align-center mb-1 mt-2"}, "content": [
+                    {"component": "VChip", "props": {"color": "grey", "variant": "outlined", "size": "x-small", "class": "mr-2"}, "text": undated_label},
+                    {"component": "div", "props": {"class": "text-caption text-grey"}, "text": f"{len(undated)} 部（热度排序）"},
+                ]})
+                result.extend(_render_grid(undated, 4, "grey"))
             return result
 
         page = [
@@ -314,9 +356,9 @@ class MediaDiscovery(_PluginBase):
                             "variant": "tonal" if not is_anime_view else "outlined",
                             "class": "mr-2",
                             "prepend-icon": "mdi-movie-open",
-                        }, "text": "热门影视",
+                        }, "text": "影视",
                          "events": {"click": {"api": f"plugin/MediaDiscovery/switch_view?apikey={api_token}", "method": "post", "params": {"view": "movies"}}}},
-                        {"component": "VChip", "props": {"color": "primary" if is_anime_view else "orange", "variant": "flat", "size": "small"}, "text": f"当前: {'番剧' if is_anime_view else '热门影视'}"},
+                        {"component": "VChip", "props": {"color": "primary" if is_anime_view else "orange", "variant": "flat", "size": "small"}, "text": f"当前: {'番剧' if is_anime_view else '影视'}"},
                         {"component": "VChip", "props": {"color": "grey", "variant": "outlined", "size": "small", "class": "ml-2"}, "text": "热度排序: 高→低"},
                     ]},
                 ]},
@@ -371,24 +413,26 @@ class MediaDiscovery(_PluginBase):
             ]},
         ]
 
-        # TV 分组（番剧/影视共用统一布局）
+        # TV 分组：番剧/影视统一按星期分组（星期一~星期日，组内高热度在前）
         if tv_list:
             page.append({"component": "div", "props": {"class": "d-flex align-center mb-1 mt-2"}, "content": [
                 {"component": "VChip", "props": {"color": "primary", "variant": "flat", "size": "small", "class": "mr-2"}, "text": "TV动画" if is_anime_view else "TV剧集"},
-                {"component": "div", "props": {"class": "text-caption text-grey"}, "text": f"{tv_count} 部（按热度排序）"},
+                {"component": "div", "props": {"class": "text-caption text-grey"}, "text": f"{tv_count} 部（按星期分组，组内热度排序）"},
             ]})
-            page.extend(_render_grid(tv_list, 4, "primary"))
+            page.extend(_render_grouped(tv_dated, tv_undated, weekdays, "blue", "TV"))
 
-        # 电影分组（番剧/影视共用统一布局）
+        # 电影分组：番剧/影视统一按年月分组
         if movie_list:
             page.append({"component": "VDivider", "props": {"class": "my-3"}})
             page.append({"component": "div", "props": {"class": "d-flex align-center mb-1 mt-2"}, "content": [
                 {"component": "VChip", "props": {"color": "orange", "variant": "flat", "size": "small", "class": "mr-2"}, "text": "电影" if is_anime_view else "电影/热映"},
-                {"component": "div", "props": {"class": "text-caption text-grey"}, "text": f"{movie_count} 部（按热度排序）"},
+                {"component": "div", "props": {"class": "text-caption text-grey"}, "text": f"{movie_count} 部（按年月分组，组内热度排序）"},
             ]})
-            page.extend(_render_grid(movie_list, 4, "orange"))
+            month_order = sorted(movie_dated.keys(), reverse=True)
+            page.extend(_render_grouped(movie_dated, movie_undated, month_order, "orange", "电影"))
 
         return page
+
 
     def _build_anime_card(self, anime: Dict[str, Any], api_token: str) -> dict:
         """构建单个番剧/影视卡片。"""
@@ -520,7 +564,7 @@ class MediaDiscovery(_PluginBase):
                 if today_items:
                     today_items.sort(key=lambda a: a.get("rating", 0), reverse=True)
                     titles = "\n".join([f"· {a.get('title')} ★{a.get('rating', 0)}" for a in today_items[:20]])
-                    label = "热门影视" if self._current_view == "movies" else "新番"
+                    label = "影视" if self._current_view == "movies" else "新番"
                     title_text = f"[{label}] 今日更新 ({len(today_items)}部)"
                 else:
                     titles = "今日暂无更新"
@@ -1231,7 +1275,7 @@ class MediaDiscovery(_PluginBase):
                 del self._cache[cache_key]
 
             logger.info(f"视图切换: {old_view} -> {new_view}，已清除对应缓存")
-            return {"success": True, "message": f"已切换到{'番剧' if new_view == 'anime' else '热门影视'}视图", "view": new_view}
+            return {"success": True, "message": f"已切换到{'番剧' if new_view == 'anime' else '影视'}视图", "view": new_view}
         except Exception as e:
             logger.error(f"切换视图失败: {e}")
             return {"success": False, "message": str(e)}
