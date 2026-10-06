@@ -45,7 +45,7 @@ class MediaDiscovery(_PluginBase):
     plugin_name = "当季新番与热门影视"
     plugin_desc = "发现当季新番和热门影视，支持多数据源，按日期分组，一键订阅追剧。"
     plugin_icon = "mdi-play-circle"
-    plugin_version = "1.3.3"
+    plugin_version = "1.3.4"
     plugin_label = "订阅"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "media_discovery_"
@@ -518,27 +518,9 @@ class MediaDiscovery(_PluginBase):
 
         # 根据当前视图选择数据源
         if self._current_view == "movies":
-            # 影视视图
-            if self._movies_source == "auto":
-                anime_list = self._fetch_movies_auto()
-            elif self._movies_source == "douban_hot":
-                anime_list = self._fetch_douban()
-            else:
-                anime_list = self._fetch_hot_movies()
+            anime_list = self._fetch_view_data("movies")
         else:
-            # 番剧视图
-            if self._anime_source == "auto":
-                anime_list = self._fetch_auto()
-            elif self._anime_source == "mikan":
-                anime_list = self._fetch_mikan()
-            elif self._anime_source == "bangumi":
-                anime_list = self._fetch_bangumi()
-            elif self._anime_source == "anibk":
-                anime_list = self._fetch_anibk()
-            elif self._anime_source == "anibk_daily":
-                anime_list = self._fetch_anibk_daily()
-            else:
-                anime_list = self._fetch_tmdb()
+            anime_list = self._fetch_view_data("anime")
 
         if anime_list:
             self._check_subscriptions(anime_list)
@@ -547,35 +529,67 @@ class MediaDiscovery(_PluginBase):
             if self._min_year > 0:
                 anime_list = [a for a in anime_list if int(a.get("year", "0") or "0") >= self._min_year]
 
-            # 每日推送通知
-            if self._notify_new:
-                today_weekday = datetime.now().isoweekday()
-                today_items = []
-                for a in anime_list:
-                    ad = a.get("air_date", "")
-                    if ad:
-                        try:
-                            ad_date = datetime.strptime(ad[:10], "%Y-%m-%d").date()
-                            if ad_date.isoweekday() == today_weekday:
-                                today_items.append(a)
-                        except Exception:
-                            pass
-
-                if today_items:
-                    today_items.sort(key=lambda a: a.get("rating", 0), reverse=True)
-                    titles = "\n".join([f"· {a.get('title')} ★{a.get('rating', 0)}" for a in today_items[:20]])
-                    label = "影视" if self._current_view == "movies" else "新番"
-                    title_text = f"[{label}] 今日更新 ({len(today_items)}部)"
-                else:
-                    titles = "今日暂无更新"
-                    title_text = "[当季新番与热门影视] 今日更新 (0部)"
-
-                self.post_message(mtype=NotificationType.Manual, title=title_text, text=titles)
-                logger.info(f"已推送通知，{len(today_items)}部，视图: {self._current_view}，时间: {datetime.now()}")
-
         self._cache[cache_key] = anime_list
         self._cache_time = now
         return anime_list
+
+    def _fetch_view_data(self, view: str) -> List[Dict[str, Any]]:
+        """根据视图类型获取数据（不检查订阅状态，不写缓存）。"""
+        if view == "movies":
+            if self._movies_source == "auto":
+                return self._fetch_movies_auto()
+            elif self._movies_source == "douban_hot":
+                return self._fetch_douban()
+            else:
+                return self._fetch_hot_movies()
+        else:
+            if self._anime_source == "auto":
+                return self._fetch_auto()
+            elif self._anime_source == "mikan":
+                return self._fetch_mikan()
+            elif self._anime_source == "bangumi":
+                return self._fetch_bangumi()
+            elif self._anime_source == "anibk":
+                return self._fetch_anibk()
+            elif self._anime_source == "anibk_daily":
+                return self._fetch_anibk_daily()
+            else:
+                return self._fetch_tmdb()
+
+    def _notify_today(self, view: str) -> None:
+        """推送指定视图的今日更新通知。"""
+        if not self._notify_new:
+            return
+        try:
+            data = self._fetch_view_data(view)
+            if not data:
+                return
+            self._check_subscriptions(data)
+            today_weekday = datetime.now().isoweekday()
+            today_items = []
+            for a in data:
+                ad = a.get("air_date", "")
+                if ad:
+                    try:
+                        ad_date = datetime.strptime(ad[:10], "%Y-%m-%d").date()
+                        if ad_date.isoweekday() == today_weekday:
+                            today_items.append(a)
+                    except Exception:
+                        pass
+
+            label = "影视" if view == "movies" else "新番"
+            if today_items:
+                today_items.sort(key=lambda a: a.get("popularity", 0) if a.get("popularity", 0) else a.get("rating", 0), reverse=True)
+                titles = "\n".join([f"· {a.get('title')} ★{a.get('rating', 0)}" for a in today_items[:20]])
+                title_text = f"[{label}] 今日更新 ({len(today_items)}部)"
+            else:
+                titles = "今日暂无更新"
+                title_text = f"[{label}] 今日更新 (0部)"
+
+            self.post_message(mtype=NotificationType.Manual, title=title_text, text=titles)
+            logger.info(f"已推送{label}通知，{len(today_items)}部，时间: {datetime.now()}")
+        except Exception as e:
+            logger.warning(f"推送{view}通知失败: {e}")
 
     def _get_season_range(self) -> Tuple[str, str]:
         """获取当前季度的日期范围。"""
@@ -1281,8 +1295,12 @@ class MediaDiscovery(_PluginBase):
             return {"success": False, "message": str(e)}
 
     def _scheduled_refresh(self):
-        """定时刷新（由调度器调用）。"""
-        self._cache.clear(); self._cache_time = 0
+        """定时刷新（由调度器调用）：分别推送番剧和影视的今日更新。"""
+        self._cache.clear()
+        self._cache_time = 0
+        if self._notify_new:
+            self._notify_today("anime")
+            self._notify_today("movies")
         self._get_anime_list()
 
     def _subscribe_anime(self, params: SubscribeParams) -> dict:
