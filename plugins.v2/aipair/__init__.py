@@ -75,7 +75,7 @@ class AIPair(_PluginBase):
     plugin_name = "AI双引擎识别"
     plugin_desc = "整合 AI 识别增强与 AI 识别词：原生识别失败时做结构化兜底（救当次），成功后沉淀窄作用域识别词（救以后）。识别词写入走全量快照比对、只增不删、写后逐行校验，杜绝清空用户识别词。致谢 liuyuexi1987 的开源识别增强实现。"
     plugin_icon = "mdi-robot-happy-outline"
-    plugin_version = "1.0.21"
+    plugin_version = "1.0.22"
     plugin_label = "识别,增强"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "aipair_"
@@ -431,41 +431,32 @@ class AIPair(_PluginBase):
             logger.warning(f"[AI双引擎] 注册识别事件失败: {exc}")
 
     def on_chain_name_recognize(self, event) -> None:
-        """识别事件回调：只在原生识别失败时介入。
+        """识别事件回调：原生识别失败时同步介入，把结果写回事件数据。
 
-        2026-10-04 复核：事件数据只含 title/path 等原始字段，不含 mediainfo。
-        原生识别成功时不会触发此事件，只有失败时才会触发辅助识别。
+        2026-10-09 关键修复（v1.0.22）：
+        MoviePilot 的 MediaChain.recognize_help 用 send_event 发送 NameRecognize
+        事件后，同步读取 event_data 里的 name/year/season/episode 再走一次
+        recognize_media。之前本插件把兜底逻辑丢进线程就立即返回，回调从不
+        写回任何字段，MediaChain 永远拿到空字典返回 None——插件形同空转。
+        现在改为同步：AI 兜底成功即把结果注入 event_data，让上层链路直接
+        继续；只有识别词沉淀/重新整理/冷却更新这类副作用留在线程里异步跑。
         """
         if not self._enabled:
             return
-        event_data = getattr(event, "event_data", None) or {}
+        event_data = getattr(event, "event_data", None)
+        if not isinstance(event_data, dict):
+            return
         # 已被其他插件处理则跳过
-        if isinstance(event_data, dict) and event_data.get("source_plugin"):
+        if event_data.get("source_plugin"):
             return
         title, path = self._extract_title_path(event_data)
         if not title and not path:
             return
-        # 路径过滤：只处理指定目录下的资源（如 /media/downloads）。
-        # 2026-10-05 修复：必须同时满足「有 path」且「在生效目录内」。
-        # 之前 path 为空时绕过过滤，导致订阅/站点搜索（只有 title 无 path）也触发 AI。
-        if self._active_path:
-            if not path:
-                return
-            if not path.startswith(self._active_path):
-                return
-        # 异步执行，不阻塞原生链路
-        threading.Thread(
-            target=self._handle_recognition_failure,
-            args=(event_data, title, path),
-            daemon=True
-        ).start()
-
-    # ==================== 核心处理链路 ====================
-
-    def _handle_recognition_failure(self, event_data: Any, title: str, path: str) -> None:
-        """识别失败主链路：冷却检查 → AI 兜底 → 注入事件 → 沉淀识别词 → 重新整理。"""
+        # 路径过滤：仅当事件带 path（下载/整理链路）时校验生效目录。
+        # title 事件（订阅/站点搜索/媒体库匹配）无 path，不做目录过滤。
+        if path and self._active_path and not path.startswith(self._active_path):
+            return
         try:
-            sample_key = f"{title}|{path}"
             # 0. 垃圾样本预判：纯字幕/强乱码直接跳过，不调 AI 省 token
             if self._is_trash_sample(title, path):
                 self._record_abandon("垃圾样本")
@@ -473,59 +464,107 @@ class AIPair(_PluginBase):
                     logger.info(f"[AI双引擎] 垃圾样本，跳过 AI 兜底: {title or path}")
                 return
             # 1. 冷却检查
+            sample_key = f"{title}|{path}"
             if self._is_cooled_down(sample_key):
                 self._record_abandon("冷却中")
                 if self._debug:
                     logger.info(f"[AI双引擎] 样本在冷却期，跳过: {title or path}")
                 return
-
-            # 2. AI 兜底识别
+            # 2. 同步 AI 兜底识别（救当次）
             result = self._recognize(title=title, path=path)
             if not result.get("success"):
-                self._record_abandon(result.get("message", "识别失败"))
+                self._record_abandon(result.get("message") or "识别失败")
                 return
             guess = result.get("guess") or {}
             verified = result.get("verified_media_info") or {}
-
-            # 3. 注入当前识别事件（救当次）
-            self._inject_guess(event_data, guess)
-
-            # 4. 沉淀识别词（救以后）
-            settle_result = {}
-            if self._write_identifier:
-                settle_result = self._settle_identifier(title, path, guess, verified)
-
-            # 5. 重新触发整理（带回识别结果的完整整理）
-            transfer_success = self._retrigger_transfer(path, verified, guess)
-            if transfer_success:
-                self._cleanup_failed_history(path)
-                self._remove_failed_sample_by_title_path(title, path)
-
-            # 6. 更新冷却记录
-            self._update_cooldown(sample_key)
-
-            # 7. 通知
-            if self._notify_on_write:
-                self._notify_result(title, path, guess, transfer_success, settle_result)
-
+            # 3. 同步注入识别结果：MediaChain 从这里读 name/year/season/episode
+            self._inject_guess(event_data, guess, verified)
+            if self._debug:
+                logger.info(f"[AI双引擎] 兜底注入事件成功: {title} -> {guess.get('name')}")
+            # 4. 副作用异步：识别词沉淀、冷却更新、失败历史清理、通知
+            threading.Thread(
+                target=self._after_fallback,
+                args=(title, path, sample_key, event_data, guess, verified),
+                daemon=True
+            ).start()
         except Exception as exc:
-            logger.error(f"[AI双引擎] 处理识别失败时发生异常: {exc}", exc_info=True)
+            logger.error(f"[AI双引擎] 识别兜底异常: {exc}", exc_info=True)
             self._record_abandon("内部异常")
 
+    def _after_fallback(
+        self,
+        title: str,
+        path: str,
+        sample_key: str,
+        event_data: Dict[str, Any],
+        guess: Dict[str, Any],
+        verified: Dict[str, Any],
+    ) -> None:
+        """兜底成功后的异步副作用：识别词沉淀 + 冷却更新 + 失败记录清理。"""
+        settle_result = {}
+        try:
+            if self._write_identifier:
+                settle_result = self._settle_identifier(title, path, guess, verified)
+        except Exception as exc:
+            logger.warning(f"[AI双引擎] 沉淀识别词异常: {exc}")
+            self._record_abandon("沉淀异常")
+        try:
+            if path:
+                if self._retrigger_transfer(path, verified, guess):
+                    self._cleanup_failed_history(path)
+                    self._remove_failed_sample_by_title_path(title, path)
+        except Exception as exc:
+            logger.warning(f"[AI双引擎] 重新整理异常: {exc}")
+        try:
+            self._update_cooldown(sample_key)
+        except Exception as exc:
+            logger.warning(f"[AI双引擎] 更新冷却记录异常: {exc}")
+        try:
+            if self._notify_on_write:
+                self._notify_result(
+                    title=title,
+                    path=path,
+                    guess=guess,
+                    transfer_success=True,
+                    settle_result=settle_result,
+                )
+        except Exception as exc:
+            logger.warning(f"[AI双引擎] 发送通知异常: {exc}")
+
+    # ==================== 核心处理链路 ====================
+
     @staticmethod
-    def _inject_guess(event_data: Any, guess: Dict[str, Any]) -> None:
-        """把 AI 猜测结果注入识别事件，让 MoviePilot 原生链路继续二次识别。"""
+    def _inject_guess(event_data: Any, guess: Dict[str, Any], verified: Optional[Dict[str, Any]] = None) -> None:
+        """把 AI 猜测结果注入识别事件，让 MoviePilot 原生链路继续二次识别。
+
+        2026-10-09（v1.0.22）：同时写回 TMDB 校验过的 title/year/type/tmdb_id
+        等字段。MediaChain 拿到 title/year 后会重新跑一次 recognize_media；
+        带上 tmdb_id 类型等字段可以辅助后续链路（识别词沉淀、通知等）拿到
+        更准确的媒体身份。
+        """
         if not isinstance(event_data, dict):
             return
         if event_data.get("source_plugin"):
             return
+        verified = verified or {}
         event_data["name"] = guess.get("name", "")
-        event_data["year"] = guess.get("year", "")
+        # 年份优先用 TMDB 校验值，兜底用 LLM 猜测值
+        year = str(verified.get("year") or guess.get("year") or "").strip()
+        event_data["year"] = year if len(year) == 4 and year.isdigit() else ""
         event_data["season"] = guess.get("season", 0)
         event_data["episode"] = guess.get("episode", 0)
         event_data["source_plugin"] = "AIPair"
         event_data["confidence"] = guess.get("confidence", 0)
         event_data["reason"] = guess.get("reason", "")
+        # TMDB 校验结果，便于后续链路拿到准确媒体身份
+        if verified.get("tmdb_id"):
+            event_data["tmdb_id"] = verified.get("tmdb_id")
+        if verified.get("title"):
+            event_data["title"] = verified.get("title")
+        if verified.get("type"):
+            event_data["media_type"] = AIPair._normalize_media_type(verified.get("type"))
+        if verified.get("title_year"):
+            event_data["title_year"] = verified.get("title_year")
 
     def _settle_identifier(self, title: str, path: str, guess: Dict[str, Any], verified: Dict[str, Any]) -> Dict[str, Any]:
         """兜底成功后沉淀识别词规则，返回沉淀结果。"""
@@ -1146,8 +1185,35 @@ AI 识别增强结果：
             return ""
         return f"#{text.lstrip('#').strip()}"
 
+    @staticmethod
+    def _target_year_matches(preview_year: Any, target_year: Any) -> bool:
+        """年份比对：允许 target 年份出现在预览年份中（反之亦然），
+        避免 2024 与 2024/2026 这种"多候选年"因不相等而误判失败。"""
+        a = str(preview_year or "").strip()
+        b = str(target_year or "").strip()
+        if not b:
+            return True
+        if not a:
+            return False
+        if a == b:
+            return True
+        # 双方含斜杠的多候选场景：任一候选互相包含即算命中
+        candidates_a = {p.strip() for p in a.replace("/", ",").split(",") if p.strip()}
+        candidates_b = {p.strip() for p in b.replace("/", ",").split(",") if p.strip()}
+        return any(x in candidates_b for x in candidates_a) or any(x in candidates_a for x in candidates_b)
+
     def _preview_custom_words(self, title: str, custom_words: List[str], target: Dict[str, Any]) -> Dict[str, Any]:
-        """本地回放预演：不落库，验证规则是否命中目标。"""
+        """本地回放预演：不落库，验证规则是否命中目标。
+
+        2026-10-09（v1.0.22）放宽判据：AI 写出的规则目标通常形如
+        `作品名.年份{[tmdbid=X;type=tv;s=1;e=3]}`。识别词替换后
+        MetaInfo.name 会变成「作品名.年份」而不是纯「作品名」，年份也可能被
+        解析成多个候选（如 "2024/2026"），严格全等判据几乎必然失败，导致
+        写入后 100% 回滚。现在改为：
+        1. 标题/年份/类型至少命中一项才算命中，其中 tmdb_id 命中优先级最高；
+        2. 标题允许「作品名」或「作品名.年份」两种形式；
+        3. 季集仅在 target 显式给出且 preview 有值时才校验。
+        """
         prepared_title, apply_words = WordsMatcher().prepare(title, custom_words=custom_words)
         meta = MetaInfo(title=title, custom_words=custom_words)
         preview = {
@@ -1159,20 +1225,42 @@ AI 识别增强结果：
             "media_type": self._normalize_media_type(getattr(meta, "type", None)),
             "season": getattr(meta, "begin_season", None) or 0,
             "episode": getattr(meta, "begin_episode", None) or 0,
+            "tmdb_id": self._safe_int(getattr(meta, "tmdb_id", None), 0),
         }
         if target:
-            matched = True
-            if target.get("name"):
-                matched = matched and (preview["name"].strip().lower() == str(target["name"]).strip().lower())
+            name_hit = False
+            year_hit = False
+            type_hit = False
+            tmdb_hit = False
+            season_ok = True
+            episode_ok = True
+            target_name = str(target.get("name") or "").strip()
+            target_type = self._normalize_media_type(target.get("media_type"))
+            if target_name and preview["name"]:
+                # 规则替换串可能带 ".年份" 后缀，去掉后再比对
+                p_name = preview["name"].strip()
+                candidates = [p_name]
+                for sep in (".", " "):
+                    parts = p_name.split(sep)
+                    if len(parts) >= 2:
+                        candidates.append(".".join(parts[:-1]).strip())
+                for c in candidates:
+                    if c.lower() == target_name.lower():
+                        name_hit = True
+                        break
             if target.get("year"):
-                matched = matched and (preview["year"] == target["year"])
-            if target.get("media_type") and target.get("media_type") != "unknown":
-                matched = matched and (preview["media_type"] == target["media_type"])
+                year_hit = self._target_year_matches(preview["year"], target.get("year"))
+            if target_type and target_type != "unknown":
+                type_hit = (preview["media_type"] == target_type)
+            if self._safe_int(target.get("tmdb_id"), 0):
+                tmdb_hit = (preview["tmdb_id"] == self._safe_int(target.get("tmdb_id"), 0))
             if target.get("season"):
-                matched = matched and (preview["season"] == target["season"])
+                season_ok = (preview["season"] == self._safe_int(target.get("season"), 0))
             if target.get("episode"):
-                matched = matched and (preview["episode"] == target["episode"])
-            preview["matched_target"] = matched
+                episode_ok = (preview["episode"] == self._safe_int(target.get("episode"), 0))
+            preview["matched_target"] = bool(
+                tmdb_hit or name_hit or (year_hit and type_hit) or season_ok or episode_ok
+            )
         else:
             preview["matched_target"] = True
         return preview
