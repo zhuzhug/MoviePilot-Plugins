@@ -75,7 +75,7 @@ class AIPair(_PluginBase):
     plugin_name = "AI双引擎识别"
     plugin_desc = "整合 AI 识别增强与 AI 识别词：原生识别失败时做结构化兜底（救当次），成功后沉淀窄作用域识别词（救以后）。识别词写入走全量快照比对、只增不删、写后逐行校验，杜绝清空用户识别词。致谢 liuyuexi1987 的开源识别增强实现。"
     plugin_icon = "mdi-robot-happy-outline"
-    plugin_version = "1.0.22"
+    plugin_version = "1.0.28"
     plugin_label = "识别,增强"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "aipair_"
@@ -94,7 +94,8 @@ class AIPair(_PluginBase):
     _max_failed_samples: int = 200
     _auto_remove_applied_sample: bool = True
     _clear_failed_samples_once: bool = False
-    _active_path: str = "/media/downloads"
+    _active_path: str = "/media/downloads/BT下载\n/media/downloads/Anistrm\n/media/downloads/网盘"
+    _active_paths: List[str] = []
     # 识别词部分（唯一写入方）
     _write_identifier: bool = True
     _write_min_confidence: float = 0.7
@@ -129,7 +130,14 @@ class AIPair(_PluginBase):
         self._max_failed_samples = max(20, min(1000, self._safe_int(config.get("max_failed_samples"), 200)))
         self._auto_remove_applied_sample = bool(config.get("auto_remove_applied_sample", True))
         self._clear_failed_samples_once = bool(config.get("clear_failed_samples_once", False))
-        self._active_path = str(config.get("active_path", "/media/downloads")).strip() or "/media/downloads"
+        raw_paths = str(config.get("active_path", self._active_path)) or ""
+        self._active_path = raw_paths
+        # 支持多路径：逗号、分号、换行、竖线均视为分隔符
+        self._active_paths = [
+            p.strip().rstrip("/")
+            for p in re.split(r"[\n,;|]+", raw_paths)
+            if p and p.strip()
+        ]
         self._write_identifier = bool(config.get("write_identifier", True))
         self._write_min_confidence = self._safe_float(config.get("write_min_confidence"), 0.7)
         self._cooldown_hours = int(config.get("cooldown_hours") or 24)
@@ -220,6 +228,22 @@ class AIPair(_PluginBase):
             title = getattr(event_data, "title", "") or getattr(event_data, "name", "") or getattr(event_data, "org_string", "") or ""
             path = getattr(event_data, "path", "") or getattr(event_data, "file_path", "") or getattr(event_data, "org_string", "") or ""
         return str(title or "").strip(), str(path or "").strip()
+
+    @staticmethod
+    def _is_in_active_paths(path: str, active_paths: List[str]) -> bool:
+        """严格目录边界判断：path 完全等于生效目录或以 "生效目录/" 开头才算命中。
+        避免 /media/downloads_evil 因 startswith("/media/downloads") 被误放行。"""
+        if not path or not active_paths:
+            return False
+        norm = path.rstrip("/")
+        for base in active_paths:
+            if not base:
+                continue
+            if norm == base:
+                return True
+            if norm.startswith(base + "/"):
+                return True
+        return False
 
     @staticmethod
     def _normalize_media_type(value: Any) -> str:
@@ -420,13 +444,24 @@ class AIPair(_PluginBase):
     # ==================== 事件注册与处理 ====================
 
     def _register_events(self) -> None:
-        """注册识别事件。"""
+        """注册识别事件。
+
+        2026-10-10 修复：MoviePilot 的 stop_plugin 会把整类加入
+        eventmanager.disabled_classes，但本方法此前只调
+        enable_event_handler(方法)，disabled_classes 里的类禁用标记
+        永远没被清掉，导致插件重载后所有方法都被判定为禁用、
+        事件回调静默失效。现在同时对方法所属类调用
+        enable_event_handler 清除类级禁用。
+        """
         try:
             eventmanager.register(ChainEventType.NameRecognize)(self.on_chain_name_recognize)
             if self._enabled:
                 eventmanager.enable_event_handler(self.on_chain_name_recognize)
+                # 清理类级禁用标记（reload 场景下遗留）
+                eventmanager.enable_event_handler(type(self))
             else:
                 eventmanager.disable_event_handler(self.on_chain_name_recognize)
+                eventmanager.disable_event_handler(type(self))
         except Exception as exc:
             logger.warning(f"[AI双引擎] 注册识别事件失败: {exc}")
 
@@ -440,22 +475,48 @@ class AIPair(_PluginBase):
         写回任何字段，MediaChain 永远拿到空字典返回 None——插件形同空转。
         现在改为同步：AI 兜底成功即把结果注入 event_data，让上层链路直接
         继续；只有识别词沉淀/重新整理/冷却更新这类副作用留在线程里异步跑。
+
+        2026-10-10（v1.0.26）日志降噪：
+        订阅/扫描类事件（无 path）一天会触发上千次，之前每条都打 INFO 让日志
+        文件迅速膨胀。回调入口、字段校验、路径过滤这些常规跳过分支全部改为
+        仅在 debug=True 时输出，异常仍是 error。
         """
         if not self._enabled:
+            if self._debug:
+                logger.info(f"[AI双引擎] 事件回调收到但插件未启用，跳过")
             return
         event_data = getattr(event, "event_data", None)
         if not isinstance(event_data, dict):
+            if self._debug:
+                logger.info(f"[AI双引擎] 事件回调收到但 event_data 非字典（类型={type(event_data).__name__}）")
             return
         # 已被其他插件处理则跳过
         if event_data.get("source_plugin"):
+            if self._debug:
+                logger.info(f"[AI双引擎] 事件已由 {event_data.get('source_plugin')} 处理，跳过")
             return
         title, path = self._extract_title_path(event_data)
         if not title and not path:
+            if self._debug:
+                logger.info(f"[AI双引擎] 事件回调：title 与 path 均为空，跳过")
             return
-        # 路径过滤：仅当事件带 path（下载/整理链路）时校验生效目录。
-        # title 事件（订阅/站点搜索/媒体库匹配）无 path，不做目录过滤。
-        if path and self._active_path and not path.startswith(self._active_path):
+        # 路径过滤（第一道防线，与 active_paths 无关）：
+        # 本插件定位为「辅助正常用户资源识别」，只处理带文件路径的整理类事件。
+        # 订阅扫描、站点搜索、媒体库匹配这类后台静默识别事件 MoviePilot 只发
+        # title 不带 path，天然排除，避免误把候选资源当作用户资源触发 AI。
+        # 此规则无论 active_path 是否配置都生效。此分支触发量极大，仅 debug 输出。
+        if not path:
+            if self._debug:
+                logger.info(f"[AI双引擎] 事件回调：无 path，跳过（订阅/扫描类后台识别事件） title={title[:60]}")
             return
+        # 路径过滤（第二道防线）：active_paths 已设置时，路径必须严格落在某个生效目录内。
+        # 严格目录边界：path == 生效目录 或 path 以 "生效目录/" 开头，避免 /media/downloads_evil 误放行。
+        if self._active_paths and not self._is_in_active_paths(path, self._active_paths):
+            if self._debug:
+                logger.info(f"[AI双引擎] 事件回调：路径 {path[:60]} 不在生效目录列表 {self._active_paths} 内，跳过")
+            return
+        # 走到这里说明是生效目录内的用户资源识别，值得记一条 info 便于跟踪
+        logger.info(f"[AI双引擎] 事件回调：title={title[:60]} | path={path[:60]}")
         try:
             # 0. 垃圾样本预判：纯字幕/强乱码直接跳过，不调 AI 省 token
             if self._is_trash_sample(title, path):
@@ -479,8 +540,7 @@ class AIPair(_PluginBase):
             verified = result.get("verified_media_info") or {}
             # 3. 同步注入识别结果：MediaChain 从这里读 name/year/season/episode
             self._inject_guess(event_data, guess, verified)
-            if self._debug:
-                logger.info(f"[AI双引擎] 兜底注入事件成功: {title} -> {guess.get('name')}")
+            logger.info(f"[AI双引擎] 兜底注入事件成功: {title} -> {guess.get('name')}")
             # 4. 副作用异步：识别词沉淀、冷却更新、失败历史清理、通知
             threading.Thread(
                 target=self._after_fallback,
@@ -500,8 +560,16 @@ class AIPair(_PluginBase):
         guess: Dict[str, Any],
         verified: Dict[str, Any],
     ) -> None:
-        """兜底成功后的异步副作用：识别词沉淀 + 冷却更新 + 失败记录清理。"""
+        """兜底成功后的异步副作用：识别词沉淀 + 冷却更新 + 失败记录清理。
+
+        2026-10-10（v1.0.27）：冷却记录改为「只有整理成功才写入」。
+        之前无条件写入冷却，导致整理失败时同一文件在 24h 冷却期内被判定
+        「在冷却期」而跳过重试，浪费了一次 AI 兜底机会。整理失败意味着这次
+        AI 没能帮到用户，应该允许下次继续尝试；整理成功则证明 AI 有效，
+        冷却防止重复调用浪费 token。
+        """
         settle_result = {}
+        transfer_ok = False
         try:
             if self._write_identifier:
                 settle_result = self._settle_identifier(title, path, guess, verified)
@@ -510,13 +578,18 @@ class AIPair(_PluginBase):
             self._record_abandon("沉淀异常")
         try:
             if path:
-                if self._retrigger_transfer(path, verified, guess):
+                transfer_ok = self._retrigger_transfer(path, verified, guess)
+                if transfer_ok:
                     self._cleanup_failed_history(path)
                     self._remove_failed_sample_by_title_path(title, path)
         except Exception as exc:
             logger.warning(f"[AI双引擎] 重新整理异常: {exc}")
         try:
-            self._update_cooldown(sample_key)
+            if transfer_ok:
+                self._update_cooldown(sample_key)
+            else:
+                if self._debug:
+                    logger.info(f"[AI双引擎] 整理未成功，不写入冷却：title={title[:60]} path={path[:60]}")
         except Exception as exc:
             logger.warning(f"[AI双引擎] 更新冷却记录异常: {exc}")
         try:
@@ -525,7 +598,7 @@ class AIPair(_PluginBase):
                     title=title,
                     path=path,
                     guess=guess,
-                    transfer_success=True,
+                    transfer_success=transfer_ok,
                     settle_result=settle_result,
                 )
         except Exception as exc:
@@ -779,7 +852,13 @@ MoviePilot 当前基础解析提示：
         ])
 
     def _verify_guess(self, title: str, path: str, guess: AIRecognitionGuess) -> Optional[Dict[str, Any]]:
-        """回查 TMDB 硬校验，未命中返回 None。"""
+        """回查 TMDB 硬校验，未命中返回 None。
+
+        2026-10-10（v1.0.27）：TMDB 校验失败之前完全静默——LLM 猜到名字后
+        TMDB 找不到时直接返 None，上层看不出是"猜错"还是"没查"，识别词也可能
+        带着错目标沉淀下去。现在给"LLM 有 name 但 TMDB 未命中"这条路径打一条
+        info 日志，便于后续排查；异常仍保持 debug 输出。
+        """
         if not guess.name:
             return None
         try:
@@ -802,6 +881,11 @@ MoviePilot 当前基础解析提示：
                 meta.type = MediaType.MOVIE
             mediainfo = MediaChain().recognize_media(meta=meta, cache=False)
             if not mediainfo:
+                logger.info(
+                    f"[AI双引擎] TMDB 校验未命中：LLM 猜到 name={guess.name!r} "
+                    f"year={guess.year or ''} type={guess.media_type}，但 TMDB 查无此片，"
+                    f"来源：{title[:60] or path[:60]}"
+                )
                 return None
             return mediainfo.to_dict()
         except Exception as exc:
@@ -2533,7 +2617,7 @@ AI 识别增强结果：
                                 {"component": "VTextField", "props": {"variant": "outlined", "model": "confidence_threshold", "label": "兜底注入置信度阈值", "density": "comfortable", "type": "number", "hint": "低于此值不注入", "persistent-hint": True}},
                             ]},
                             {"component": "VCol", "props": {"cols": 12, "sm": 6}, "content": [
-                                {"component": "VTextField", "props": {"variant": "outlined", "model": "active_path", "label": "生效目录路径", "hint": "只处理此目录下的资源，留空则处理所有", "persistent-hint": True, "placeholder": "/media/downloads"}},
+                                {"component": "VTextarea", "props": {"variant": "outlined", "model": "active_path", "label": "生效目录路径（多个用换行、逗号、分号或竖线分隔）", "hint": "只处理这些目录下的资源，留空则处理所有；不支持通配符，每条必须是一个绝对路径前缀", "persistent-hint": True, "density": "comfortable", "rows": 1, "auto-grow": True, "placeholder": "/media/downloads/BT下载"}},
                             ]},
                         ],
                     },
@@ -2602,7 +2686,7 @@ AI 识别增强结果：
             "max_failed_samples": 200,
             "auto_remove_applied_sample": True,
             "clear_failed_samples_once": False,
-            "active_path": "/media/downloads",
+            "active_path": "/media/downloads/BT下载\n/media/downloads/Anistrm\n/media/downloads/网盘",
             "write_identifier": True,
             "write_min_confidence": 0.7,
             "cooldown_hours": 24,
