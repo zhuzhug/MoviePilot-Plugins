@@ -75,7 +75,7 @@ class AIPair(_PluginBase):
     plugin_name = "AI双引擎识别"
     plugin_desc = "整合 AI 识别增强与 AI 识别词：原生识别失败时做结构化兜底（救当次），成功后沉淀窄作用域识别词（救以后）。识别词写入走全量快照比对、只增不删、写后逐行校验，杜绝清空用户识别词。致谢 liuyuexi1987 的开源识别增强实现。"
     plugin_icon = "mdi-robot-happy-outline"
-    plugin_version = "1.0.28"
+    plugin_version = "1.0.29"
     plugin_label = "识别,增强"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "aipair_"
@@ -879,6 +879,14 @@ MoviePilot 当前基础解析提示：
                 meta.type = MediaType.TV
             elif guess.media_type == "movie":
                 meta.type = MediaType.MOVIE
+            else:
+                # media_type 不明（LLM 返回 unknown）且无季集线索时，meta.type 保持 None，
+                # TMDB 会走模糊搜索，可能命中与真实作品不同类型/错作品。
+                # 打一条 warn 便于事后判断"低置信度注入"是否来自类型不明。
+                logger.warning(
+                    f"[AI双引擎] TMDB 校验类型不明（LLM 未给 type、也无季集线索），走模糊搜索： "
+                    f"name={guess.name!r} year={guess.year or ''} 来源={title[:60] or path[:60]}"
+                )
             mediainfo = MediaChain().recognize_media(meta=meta, cache=False)
             if not mediainfo:
                 logger.info(
@@ -1316,8 +1324,8 @@ AI 识别增强结果：
             year_hit = False
             type_hit = False
             tmdb_hit = False
-            season_ok = True
-            episode_ok = True
+            season_ok: Optional[bool] = None
+            episode_ok: Optional[bool] = None
             target_name = str(target.get("name") or "").strip()
             target_type = self._normalize_media_type(target.get("media_type"))
             if target_name and preview["name"]:
@@ -1468,8 +1476,11 @@ AI 识别增强结果：
             if r and " => " in r:
                 rules = [r]
         if not tmdb_id or not title or not rules:
-            # fallback：无法构建模板时用原始方式
-            return [f"{self._AI_MARK}{x}" for x in (rules or [str(chosen.get("rule") or "")]) if x] + rules
+            # fallback：无法构建模板时用原始规则，仍统一加 AI 标记（去重由 _append_custom_identifiers 保证）
+            if not rules:
+                fallback_rule = str(chosen.get("rule") or "").strip()
+                rules = [fallback_rule] if fallback_rule else []
+            return [f"{self._AI_MARK}{r}" for r in rules if r]
         header = f"# ==================== {title}（tmdbid={tmdb_id}）===================="
         mark_line = f"# 【{title}】"
         # 分组头/作品标记/规则行都带 _AI_MARK，便于识别词列表中一眼看出来源
