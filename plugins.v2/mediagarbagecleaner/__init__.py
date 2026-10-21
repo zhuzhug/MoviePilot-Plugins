@@ -36,7 +36,7 @@ class MediaGarbageCleaner(_PluginBase):
     plugin_name = "资源清理"
     plugin_desc = "扫描媒体库断链/硬链/重复/空目录/孤儿 strm/未整理/失败记录，并给出下载目录与媒体库的一一对应摘要（库内实体文件、下载库冗余副本、零字节文件、孤儿媒体目录）；支持按地址与名称保护、单次确认清理、手动或批量清理。"
     plugin_icon = "mdi-broom"
-    plugin_version = "1.13.8"
+    plugin_version = "1.13.9"
     plugin_label = "媒体整理"
     plugin_label = "媒体整理"
     plugin_author = "zhuzhug"
@@ -787,6 +787,20 @@ class MediaGarbageCleaner(_PluginBase):
                 meta_content.append({"component": "VChip", "props": {
                     "size": "x-small", "variant": "tonal", "color": "info",
                 }, "text": file_types})
+            _link_count = item.get("link_count")
+            _broken_count = item.get("broken_link_count")
+            if _link_count is None:
+                _link_count = sum(1 for f in files if f.get("is_link"))
+            if _broken_count is None:
+                _broken_count = sum(1 for f in files if f.get("link_broken"))
+            if _link_count:
+                meta_content.append({"component": "VChip", "props": {
+                    "size": "x-small", "variant": "tonal", "color": "info",
+                }, "text": f"软链 {_link_count} 个"})
+                meta_content.append({"component": "VChip", "props": {
+                    "size": "x-small", "variant": "tonal",
+                    "color": "error" if _broken_count else "success",
+                }, "text": f"断链 {_broken_count} 个" if _broken_count else "链接均有效"})
             meta_content.append({"component": "VSpacer"})
             meta_content.append({
                 "component": "VBtn", "props": {
@@ -802,22 +816,50 @@ class MediaGarbageCleaner(_PluginBase):
             file_list = []
             if files:
                 for f in files[:100]:
-                    file_list.append({
+                    _is_link = bool(f.get("is_link"))
+                    _broken = bool(f.get("link_broken"))
+                    _row_meta = [
+                        {"component": "VChip", "props": {
+                            "size": "x-small", "variant": "tonal",
+                        }, "text": f.get("ext", "")},
+                        {"component": "span", "props": {
+                            "class": "text-caption ml-2",
+                        }, "text": self._format_size(f.get("size", 0))},
+                    ]
+                    if _is_link:
+                        _row_meta.append({"component": "VChip", "props": {
+                            "size": "x-small", "variant": "tonal", "color": "info",
+                            "class": "ml-2",
+                        }, "text": "软链"})
+                        _row_meta.append({"component": "VChip", "props": {
+                            "size": "x-small", "variant": "flat",
+                            "color": "error" if _broken else "success",
+                            "class": "ml-1",
+                        }, "text": "断链" if _broken else "有效"})
+                    _row_children = [{
                         "component": "div",
-                        "props": {"class": "d-flex align-center py-0-5 text-caption"},
+                        "props": {"class": "d-flex align-center w-100"},
                         "content": [
                             {"component": "span", "props": {
                                 "class": "font-mono",
                                 "style": "color: rgba(var(--v-theme-on-surface), 0.9); word-break: break-all;"
                             }, "text": f.get("rel_path", f.get("name", ""))},
                             {"component": "VSpacer"},
-                            {"component": "VChip", "props": {
-                                "size": "x-small", "variant": "tonal",
-                            }, "text": f.get("ext", "")},
-                            {"component": "span", "props": {
-                                "class": "text-caption ml-2",
-                            }, "text": self._format_size(f.get("size", 0))},
-                        ],
+                        ] + _row_meta,
+                    }]
+                    if _is_link and f.get("link_target"):
+                        _row_children.append({"component": "div", "props": {
+                            "class": "text-caption font-mono",
+                            "style": (
+                                "word-break: break-all; padding-left: 12px; "
+                                + ("color: rgba(var(--v-theme-error), 0.95);" if _broken
+                                   else "color: rgba(var(--v-theme-on-surface), 0.55);")
+                            ),
+                        }, "text": "→ " + str(f.get("link_target"))})
+                    file_list.append({
+                        "component": "div",
+                        "props": {"class": "py-0-5 text-caption"},
+                        "content": _row_children,
                     })
                 if len(files) > 100:
                     file_list.append({
@@ -873,6 +915,8 @@ class MediaGarbageCleaner(_PluginBase):
                 _preview = f"{_preview}｜源文件 {len(src_paths)} 条"
             else:
                 _preview = f"{_preview}｜整理历史无源文件记录"
+            if _link_count:
+                _preview = f"{_preview}｜软链 {_link_count} 个（断链 {_broken_count} 个）"
             info_block = {
                 "component": "div",
                 "props": {"class": "d-flex flex-column"},
@@ -1442,6 +1486,14 @@ class MediaGarbageCleaner(_PluginBase):
                 fp = os.path.join(sub_root, f)
                 ext = os.path.splitext(f)[1].lower() or "(无扩展名)"
                 is_link = os.path.islink(fp)
+                link_target = ""
+                link_broken = False
+                if is_link:
+                    try:
+                        link_target = os.readlink(fp)
+                    except OSError:
+                        link_target = ""
+                    link_broken = not os.path.exists(fp)
                 try:
                     fsize = 0 if is_link else os.path.getsize(fp)
                 except OSError:
@@ -1454,6 +1506,8 @@ class MediaGarbageCleaner(_PluginBase):
                     "ext": ext,
                     "size": fsize,
                     "is_link": is_link,
+                    "link_target": link_target,
+                    "link_broken": link_broken,
                 })
         ext_counter: Dict[str, int] = {}
         for f in all_files:
@@ -1469,12 +1523,17 @@ class MediaGarbageCleaner(_PluginBase):
             parent = os.path.dirname(root)
             src_hits = self._lookup_src_for_name(os.path.basename(root), parent, src_index)
 
+        link_count = sum(1 for f in all_files if f.get("is_link"))
+        broken_link_count = sum(1 for f in all_files if f.get("link_broken"))
+
         return {
             "path": root,
             "size": total_size,
             "file_count": len(all_files),
             "files": all_files,
             "file_types": type_summary,
+            "link_count": link_count,
+            "broken_link_count": broken_link_count,
             "media_dir": os.path.basename(root),
             "item_type": "orphan_media_dir",
             "safe_reason": "目录内仅有刮削元数据，无任何视频或有效链接",
