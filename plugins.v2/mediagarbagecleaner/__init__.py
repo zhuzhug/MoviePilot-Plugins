@@ -36,7 +36,7 @@ class MediaGarbageCleaner(_PluginBase):
     plugin_name = "资源清理"
     plugin_desc = "扫描媒体库断链/硬链/重复/空目录/孤儿 strm/未整理/失败记录，并给出下载目录与媒体库的一一对应摘要（库内实体文件、下载库冗余副本、零字节文件、孤儿媒体目录）；支持按地址与名称保护、单次确认清理、手动或批量清理。"
     plugin_icon = "mdi-broom"
-    plugin_version = "1.13.7"
+    plugin_version = "1.13.8"
     plugin_label = "媒体整理"
     plugin_label = "媒体整理"
     plugin_author = "zhuzhug"
@@ -135,6 +135,9 @@ class MediaGarbageCleaner(_PluginBase):
             self._video_exts = {e.lower() for e in getattr(settings, "RMT_MEDIAEXT", [])}
         except Exception:
             self._video_exts = set()
+        # .strm 是网盘类媒体库的实体源文件，必须始终视为有效视频。
+        # 不能依赖系统视频扩展名配置是否包含它，否则纯 strm 目录会被误判成只剩刮削数据的孤儿。
+        self._video_exts = set(self._video_exts or set()) | {".strm"}
         self._scan_results = self.get_data("scan_results") or {}
         # 孤儿 strm 扫描配置
         self._orphan_scan_enabled = bool(config.get("orphan_scan_enabled", False))
