@@ -36,7 +36,7 @@ class MediaGarbageCleaner(_PluginBase):
     plugin_name = "资源清理"
     plugin_desc = "扫描媒体库断链/硬链/重复/空目录/孤儿 strm/未整理/失败记录，并给出下载目录与媒体库的一一对应摘要（库内实体文件、下载库冗余副本、零字节文件、孤儿媒体目录）；支持按地址与名称保护、单次确认清理、手动或批量清理。"
     plugin_icon = "mdi-broom"
-    plugin_version = "1.13.9"
+    plugin_version = "1.13.11"
     plugin_label = "媒体整理"
     plugin_label = "媒体整理"
     plugin_author = "zhuzhug"
@@ -2017,6 +2017,13 @@ class MediaGarbageCleaner(_PluginBase):
                     continue
                 if self._name_protected(os.path.basename(root)):
                     continue
+                # 分类目录（综艺/美剧/国产剧等）即使为空也属正常结构，不计为垃圾
+                if os.path.dirname(root) == lib_dir or os.path.basename(root) in {
+                    "国漫", "日番", "国产剧", "欧美剧", "日韩剧", "纪录片", "综艺",
+                    "儿童", "未分类", "短剧", "网盘资源", "电影", "电视剧", "音乐",
+                    "动画电影", "华语电影", "外语电影",
+                }:
+                    continue
                 if not os.listdir(root):
                     empty.append({"path": root, "item_type": "empty_dir"})
         return empty
@@ -2629,13 +2636,10 @@ class MediaGarbageCleaner(_PluginBase):
                 self._notify_result("删除被拒绝", msg, fail=True)
             return {"success": False, "message": msg}
 
-        # 单条删除守卫：silent=True 表示由批量删除/全部删除流程内调用，直接放行。
-        # _delete_item_confirmed 令牌由 _request_delete(immediate=True) 一次性设置。
-        if not silent and not self._delete_item_confirmed:
-            logger.warning(f"拒绝未经确认的单条删除: {path}")
-            msg = f"未经确认流程，已拒绝删除: {os.path.basename(path)}"
-            self._notify_result("删除被拒绝", msg, fail=True)
-            return {"success": False, "message": msg}
+        # 单条删除不再需要确认令牌：界面上的删除按钮本身就是用户的明确操作。
+        # 旧逻辑要求令牌，但令牌只由批量确认流程设置，且页面每次渲染都会重置，
+        # 导致单条删除永远被拒绝、点击后仅页面重渲染，看起来像“没反应”。
+        # 批量删除仍由 _delete_all / _batch_delete_selected 自行把关。
 
         try:
             if item_type == "broken_symlink" and os.path.islink(path):
