@@ -145,7 +145,7 @@ https://github.com/zhuzhug/MoviePilot-Plugins
 
 ---
 
-### Emby调用播放器（EmbyExtPlayer）v1.0.0
+### Emby调用播放器（EmbyExtPlayer）v1.1.0
 
 一键给 Emby 详情页加上「调用本地播放器」按钮，支持 strm / 网盘（AList）直链。适配 `amilys/embyserver:latest` 镜像，致谢镜像原作者的 `ext.js` 扩展机制。
 
@@ -157,6 +157,10 @@ https://github.com/zhuzhug/MoviePilot-Plugins
 - **中文路径修复**：直链已是百分号编码，脚本不再二次编码（否则 `%E5` 变 `%25E5`，AList 返回错误 JSON，播放器报「无服务」）。
 - **所有详情页生效**：strm 条目无媒体流也照常注入，Emby 重绘后自动补插。
 - **免重启 / 自愈**：挂载 docker.sock 可直写容器免重启；可设定时巡检，容器重建后自动补写。
+
+**详情页（部署控制台）**
+
+插件详情页会实时体检 11 项（镜像是否支持 ext.js、ext.sh 钩子、脚本版本、容器内是否生效、docker.sock 能力等），有问题的项附处理建议；顶部显示上次操作结果，并提供「立即应用 / 重新检测 / 重启 Emby / 还原改动」四个按钮，无需记命令。
 
 **前置条件**
 
