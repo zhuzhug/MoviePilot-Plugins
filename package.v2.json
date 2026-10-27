@@ -124,12 +124,13 @@
     "name": "Emby调用播放器",
     "description": "一键给 Emby 详情页加上「调用本地播放器」按钮，支持 strm / 网盘直链。适配 amilys/embyserver:latest 镜像（原镜像作者 amilys，感谢）。",
     "labels": "增强",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "icon": "mdi-play-box-multiple",
     "author": "zhuzhug",
     "level": 1,
     "history": {
-      "v1.0.0": "初始版本：一键部署外挂播放器按钮，支持 Pot/VLC/IINA/NPlayer/MX/Infuse/恒星/MPV/弹弹Play/复制链接；支持 strm 网盘直链与中文路径；支持条目类型过滤与自愈巡检。"
+      "v1.0.0": "初始版本：一键部署外挂播放器按钮，支持 Pot/VLC/IINA/NPlayer/MX/Infuse/恒星/MPV/弹弹Play/复制链接；支持 strm 网盘直链与中文路径；支持条目类型过滤与自愈巡检。",
+      "v1.1.0": "详情页升级为部署控制台：11 项镜像/部署体检（含镜像是否支持 ext.js）、上次操作结果、四个操作按钮与对应 API；检查结果带处理建议。"
     }
   }
 }
