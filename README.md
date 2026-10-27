@@ -1,6 +1,6 @@
 # MoviePilot-Plugins
 
-个人维护的 MoviePilot 第三方插件仓库，当前收录 4 个插件。
+个人维护的 MoviePilot 第三方插件仓库，当前收录 5 个插件。
 
 ## 订阅本仓库
 
@@ -144,6 +144,41 @@ https://github.com/zhuzhug/MoviePilot-Plugins
 - 页面渲染：Vuetify（内置 PageRender）
 
 ---
+
+### Emby调用播放器（EmbyExtPlayer）v1.0.0
+
+一键给 Emby 详情页加上「调用本地播放器」按钮，支持 strm / 网盘（AList）直链。适配 `amilys/embyserver:latest` 镜像，致谢镜像原作者的 `ext.js` 扩展机制。
+
+**主要功能**
+
+- **一键部署**：插件写入脚本并自动修改 `ext.sh` 启动钩子，无需手工进容器。
+- **10 个播放器按钮**：Pot / VLC / IINA / NPlayer / MX / Infuse / 恒星 / MPV / 弹弹Play / 复制链接，可勾选启用哪些。
+- **strm / 网盘直链**：直接使用 `.strm` 内容里的真实地址唤起播放器（Emby 对 strm 的 `/stream` 端点返回 500，走不通代理）。
+- **中文路径修复**：直链已是百分号编码，脚本不再二次编码（否则 `%E5` 变 `%25E5`，AList 返回错误 JSON，播放器报「无服务」）。
+- **所有详情页生效**：strm 条目无媒体流也照常注入，Emby 重绘后自动补插。
+- **免重启 / 自愈**：挂载 docker.sock 可直写容器免重启；可设定时巡检，容器重建后自动补写。
+
+**前置条件**
+
+必须给 MoviePilot 映射 Emby 安装目录（容器 `/config` 对应目录，内含 `config/` 与 `data/`）并授予读写权限，否则插件无法写入 `ext.sh`。
+
+**配置项**
+
+| 参数 | 说明 |
+| --- | --- |
+| `enabled` | 启用插件 |
+| `config_dir` | Emby 安装目录（MoviePilot 可见路径），留空自动探测 |
+| `container_name` | Emby 容器名，默认 `emby` |
+| `players` | 显示的播放器按钮，留空 = 全部 |
+| `playable_types` | 注入按钮的条目类型，留空 = 不过滤 |
+| `strm_host_rewrite` | 直链域名重写，如 `http://192.168.2.60:9527` |
+| `watch_ms` | 按钮巡检间隔，默认 700ms |
+| `direct_write` | 免重启直写容器（需 docker.sock） |
+| `auto_restart` | 关闭直写时自动重启 Emby |
+| `heal_hours` | 自愈巡检间隔（小时），0 关闭 |
+
+**命令**：`/emby_ext_apply`、`/emby_ext_status`、`/emby_ext_restore`
+
 
 ## 已合并/废弃的插件
 
