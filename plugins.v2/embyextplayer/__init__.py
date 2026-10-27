@@ -2,9 +2,12 @@ import io
 import os
 import re
 import tarfile
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+import requests
 
 from app.core.event import eventmanager, Event
 from app.log import logger
@@ -33,7 +36,7 @@ class EmbyExtPlayer(_PluginBase):
         "适配 amilys/embyserver:latest 镜像（原镜像作者 @amilys，感谢）。"
     )
     plugin_icon = "mdi-play-box-multiple"
-    plugin_version = "1.0.0"
+    plugin_version = "1.1.0"
     plugin_label = "增强"
     plugin_author = "zhuzhug"
     plugin_config_prefix = "embyextplayer_"
@@ -51,6 +54,8 @@ class EmbyExtPlayer(_PluginBase):
     _direct_write: bool = False
     _heal_hours: int = 0
     _container_ui_dir: str = _CONTAINER_UI_DIR
+    _cap_cache: List[Dict[str, Any]] = []
+    _cap_time: float = 0
 
     def init_plugin(self, config: dict = None) -> None:
         """根据插件配置初始化运行状态。"""
@@ -66,6 +71,8 @@ class EmbyExtPlayer(_PluginBase):
         self._direct_write = False
         self._heal_hours = 0
         self._container_ui_dir = _CONTAINER_UI_DIR
+        self._cap_cache = []
+        self._cap_time = 0
         if not config:
             return
         self._enabled = bool(config.get("enabled"))
@@ -119,8 +126,42 @@ class EmbyExtPlayer(_PluginBase):
         ]
 
     def get_api(self) -> List[Dict[str, Any]]:
-        """返回插件 API 列表。"""
-        return []
+        """返回插件 API 列表（供详情页按钮调用）。"""
+        return [
+            {"path": "/apply", "endpoint": self.api_apply, "methods": ["POST"],
+             "summary": "立即部署外挂播放器按钮", "auth": "bear"},
+            {"path": "/check", "endpoint": self.api_check, "methods": ["GET"],
+             "summary": "重新检测部署状态", "auth": "bear"},
+            {"path": "/restart", "endpoint": self.api_restart, "methods": ["POST"],
+             "summary": "重启 Emby 使其加载脚本", "auth": "bear"},
+            {"path": "/restore", "endpoint": self.api_restore, "methods": ["POST"],
+             "summary": "还原插件写入的改动", "auth": "bear"},
+        ]
+
+    def api_apply(self) -> dict:
+        """详情页按钮：立即应用部署。"""
+        success, message = self.apply_all()
+        self._cap_time = 0
+        return {"success": success, "message": message}
+
+    def api_check(self) -> dict:
+        """详情页按钮：重新检测状态。"""
+        self._cap_time = 0
+        checks = self.probe_capability(force=True)
+        return {"success": True, "ready": sum(1 for c in checks if c["ok"]), "total": len(checks)}
+
+    def api_restart(self) -> dict:
+        """详情页按钮：重启 Emby。"""
+        success, message = self.restart_emby()
+        self.save_data("last_action", {"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                       "action": "restart", "success": success, "message": message})
+        return {"success": success, "message": message}
+
+    def api_restore(self) -> dict:
+        """详情页按钮：还原改动。"""
+        success, message = self.restore_all()
+        self._cap_time = 0
+        return {"success": success, "message": message}
 
     def get_service(self) -> List[Dict[str, Any]]:
         """返回插件定时服务，用于容器重建后自动补写。"""
@@ -366,22 +407,238 @@ class EmbyExtPlayer(_PluginBase):
             "heal_hours": 0,
         }
 
-    def get_page(self) -> Optional[List[dict]]:
-        """返回插件详情页面（展示部署状态）。"""
-        if not self._enabled:
+    def probe_capability(self, force: bool = False) -> List[Dict[str, Any]]:
+        """检测镜像能力与部署状态（带 60 秒缓存）。"""
+        if not force and self._cap_cache and (time.time() - self._cap_time) < 60:
+            return self._cap_cache
+        checks: List[Dict[str, Any]] = []
+
+        def add(name: str, ok: bool, detail: str, hint: str = ""):
+            """追加一条检测结果。"""
+            checks.append({"name": name, "ok": ok, "detail": detail, "hint": hint})
+
+        server = self.find_emby_server()
+        if not server:
+            add("Emby 连接", False, "未在媒体服务器配置中找到 Emby",
+                "请先在「设置 → 媒体服务器」里添加 Emby")
+            self._cap_cache, self._cap_time = checks, time.time()
+            return checks
+        host = server["host"].rstrip("/")
+        add("Emby 连接", True, host)
+
+        # 1. 镜像是否具备 ext.js 扩展入口
+        index_text = self.http_get_text(f"{host}/web/index.html")
+        has_ext_entry = bool(index_text and 'data-main="ext"' in index_text)
+        add("镜像扩展入口", has_ext_entry,
+            "index.html 含 data-main=\"ext\" ✔" if has_ext_entry else "index.html 未发现 data-main=\"ext\"",
+            "" if has_ext_entry else "当前镜像不支持 ext.js 扩展机制，请换 amilys/embyserver 这类魔改镜像")
+
+        # 2. ext.js 是否可注入（含 extmod 常量）
+        ext_text = self.http_get_text(f"{host}/web/ext.js")
+        has_extmod = bool(ext_text and re.search(r"extmod\s*=", ext_text))
+        add("ext.js 可注入", has_extmod,
+            "已找到 extmod 常量 ✔" if has_extmod else "未找到 extmod 常量",
+            "" if has_extmod else "该镜像的 ext.js 格式不同，插件自动注入会失败，需要手动适配")
+
+        # 3. 模块是否已登记
+        registered = bool(ext_text and _MODULE_NAME in ext_text)
+        add("模块已登记", registered,
+            f"extmod 已含 {_MODULE_NAME} ✔" if registered else "extmod 中还没有本模块",
+            "" if registered else "点「立即应用」后会自动登记")
+
+        # 4. 图标资源（外观相关，不影响功能）
+        icon_ok = self.http_get_status(f"{host}/web/css/icons/icon-PotPlayer.webp") == 200
+        add("播放器图标", icon_ok,
+            "icon-*.webp 存在 ✔" if icon_ok else "镜像缺少 icon-*.webp",
+            "" if icon_ok else "按钮会退化为纯文字，功能不受影响")
+
+        # 5. Emby 安装目录
+        root = self.resolve_config_dir()
+        if not root:
+            add("Emby 目录", False, "未找到可读写的 Emby 安装目录",
+                "给 MoviePilot 映射 Emby 安装目录（含 config/ 与 data/）后重试，或在配置里手填路径")
+        else:
+            writable = os.access(str(root), os.W_OK)
+            add("Emby 目录", writable, f"{root}" + ("（可写 ✔）" if writable else "（不可写 ✘）"),
+                "" if writable else "MoviePilot 对该目录没有写权限，请检查挂载参数")
+
+            # 6. ext.sh 启动钩子
+            sh_file = self.find_ext_sh(root)
+            if not sh_file:
+                add("ext.sh 钩子", False, "未找到 ext.sh",
+                    "确认目录内 config/ 下存在 ext.sh（amilys 镜像自带）")
+            else:
+                patched = _MARK_BEGIN in sh_file.read_text(encoding="utf-8", errors="replace")
+                add("ext.sh 钩子", patched,
+                    f"{sh_file.name} " + ("已写入 ✔" if patched else "未写入"),
+                    "" if patched else "点「立即应用」写入启动钩子")
+
+            # 7. 持久化脚本
+            target = root / _DEPLOY_JS
+            if target.exists():
+                live_ver = self.read_version_of(target) or "未知"
+                add("持久化脚本", True, f"{_DEPLOY_JS} 版本 {live_ver}")
+            else:
+                live_ver = None
+                add("持久化脚本", False, f"缺少 {root / _DEPLOY_JS}",
+                    "点「立即应用」生成")
+
+            # 8. 版本是否与插件内置一致
+            asset_ver = self.asset_version()
+            if live_ver and asset_ver:
+                same = live_ver == asset_ver
+                add("版本一致性", same, f"插件内置 {asset_ver} / 磁盘 {live_ver}",
+                    "" if same else "磁盘版本较旧，点「立即应用」升级")
+
+        # 9. 容器内是否生效
+        web_ver = self.web_deployed_version()
+        add("容器内生效", bool(web_ver), web_ver or "容器内未加载脚本",
+            "" if web_ver else "需要重启一次 Emby（ext.sh 只在容器启动时执行）")
+
+        # 10. docker.sock（免重启直写能力）
+        sock_ok = os.path.exists("/var/run/docker.sock")
+        add("docker.sock", sock_ok, "可用（支持免重启直写）" if sock_ok else "未挂载",
+            "" if sock_ok else "无此能力时应用后需要重启 Emby 才生效，属正常")
+
+        self._cap_cache, self._cap_time = checks, time.time()
+        return checks
+
+    def http_get_text(self, url: str) -> Optional[str]:
+        """GET 文本，失败返回 None。"""
+        try:
+            resp = requests.get(url, timeout=8)
+            return resp.text if resp.status_code == 200 else None
+        except Exception:
             return None
-        rows = []
-        for item in self.build_status():
-            rows.append({
+
+    @staticmethod
+    def http_get_status(url: str) -> int:
+        """GET 只取状态码，失败返回 0。"""
+        try:
+            return requests.get(url, timeout=8, stream=True).status_code
+        except Exception:
+            return 0
+
+    def get_page(self) -> Optional[List[dict]]:
+        """返回插件详情页面：部署状态控制台。"""
+        checks = self.probe_capability()
+        ok_count = sum(1 for c in checks if c["ok"])
+        total = len(checks)
+        all_ok = ok_count == total
+        last = self.get_data("last_action") or {}
+
+        elements: List[dict] = []
+
+        # 顶部总览
+        head_text = f"部署检查：{ok_count}/{total} 项通过"
+        if last:
+            head_text += (f"　|　上次「{last.get('action')}」"
+                          f" {last.get('time')}　{'成功' if last.get('success') else '失败'}")
+        if not self._enabled:
+            head_text += "　|　插件当前未启用"
+        elements.append({
+            "component": "VCard",
+            "props": {
+                "variant": "tonal",
+                "color": "success" if (all_ok and self._enabled) else "warning",
+                "class": "mb-3",
+            },
+            "content": [{
+                "component": "VCardText",
+                "props": {"class": "d-flex align-center flex-wrap"},
+                "content": [
+                    {
+                        "component": "VIcon",
+                        "props": {"icon": "mdi-check-circle" if all_ok else "mdi-alert-circle",
+                                  "color": "white", "size": "28", "class": "mr-3"},
+                    },
+                    {"component": "span", "props": {"class": "text-body-1"}, "text": head_text},
+                ],
+            }],
+        })
+
+        if not self._enabled:
+            elements.append({
+                "component": "VAlert",
+                "props": {"type": "warning", "variant": "tonal", "class": "mb-3",
+                          "text": "插件未启用：请先在「设置」里打开「启用插件」并保存，再点下面的「立即应用」。"},
+            })
+
+        # 操作按钮
+        elements.append({
+            "component": "VCard",
+            "props": {"variant": "outlined", "class": "mb-3"},
+            "content": [{
+                "component": "VCardText",
+                "props": {"class": "d-flex flex-wrap ga-2"},
+                "content": [
+                    {"component": "VBtn", "props": {"color": "primary", "variant": "tonal", "size": "small",
+                                                    "prepend-icon": "mdi-playlist-check", "class": "mr-2"},
+                     "text": "立即应用",
+                     "events": {"click": {"api": "plugin/EmbyExtPlayer/apply", "method": "post"}}},
+                    {"component": "VBtn", "props": {"color": "info", "variant": "tonal", "size": "small",
+                                                    "prepend-icon": "mdi-magnify-scan", "class": "mr-2"},
+                     "text": "重新检测",
+                     "events": {"click": {"api": "plugin/EmbyExtPlayer/check", "method": "get"}}},
+                    {"component": "VBtn", "props": {"color": "warning", "variant": "tonal", "size": "small",
+                                                    "prepend-icon": "mdi-restart", "class": "mr-2"},
+                     "text": "重启 Emby",
+                     "events": {"click": {"api": "plugin/EmbyExtPlayer/restart", "method": "post"}}},
+                    {"component": "VBtn", "props": {"color": "error", "variant": "text", "size": "small",
+                                                    "prepend-icon": "mdi-backup-restore"},
+                     "text": "还原改动",
+                     "events": {"click": {"api": "plugin/EmbyExtPlayer/restore", "method": "post"}}},
+                ],
+            }],
+        })
+
+        # 逐项检测结果
+        for item in checks:
+            items = [{
+                "component": "div",
+                "props": {"class": "text-body-2"},
+                "text": f"{item['name']}：{item['detail']}",
+            }]
+            if item.get("hint"):
+                items.append({
+                    "component": "div",
+                    "props": {"class": "text-caption mt-1"},
+                    "text": f"👉 {item['hint']}",
+                })
+            elements.append({
                 "component": "VAlert",
                 "props": {
                     "type": "success" if item["ok"] else "warning",
                     "variant": "tonal",
+                    "density": "compact",
                     "class": "mb-2",
-                    "text": f"{item['name']}：{item['detail']}",
                 },
+                "content": items,
             })
-        return rows or None
+
+        # 当前配置摘要
+        players = "、".join(self._players) if self._players else "全部 10 个"
+        types = "、".join(self._playable_types) if self._playable_types else "不过滤"
+        rewrite = self._strm_host_rewrite or "（未启用，使用 strm 原始地址）"
+        mode = "免重启直写容器" if self._direct_write else ("应用后重启 Emby" if self._auto_restart else "手动重启")
+        elements.append({
+            "component": "VCard",
+            "props": {"variant": "outlined", "class": "mt-2"},
+            "content": [{
+                "component": "VCardText",
+                "props": {"class": "text-caption"},
+                "content": [
+                    {"component": "div", "props": {"class": "text-subtitle-2 mb-1"}, "text": "当前配置"},
+                    {"component": "div", "text": f"按钮：{players}"},
+                    {"component": "div", "text": f"注入类型：{types}"},
+                    {"component": "div", "text": f"直链重写：{rewrite}"},
+                    {"component": "div", "text": f"生效方式：{mode}　巡检间隔：{self._watch_ms}ms"},
+                    {"component": "div", "props": {"class": "mt-2"},
+                     "text": "命令：/emby_ext_apply　/emby_ext_status　/emby_ext_restore"},
+                ],
+            }],
+        })
+        return elements
 
     def get_dashboard_meta(self) -> Optional[List[Dict[str, str]]]:
         """声明插件首页仪表板小组件。"""
@@ -772,11 +1029,25 @@ class EmbyExtPlayer(_PluginBase):
 
     # ==================== 主流程 ====================
 
+    def record_action(self, action: str, success: bool, message: str) -> None:
+        """记录最近一次操作结果，供详情页展示。"""
+        try:
+            self.save_data("last_action", {
+                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "action": action,
+                "success": success,
+                "message": message,
+            })
+        except Exception as e:
+            logger.warning(f"Emby调用播放器：记录操作结果失败 {e}")
+
     def apply_all(self) -> Tuple[bool, str]:
         """执行完整部署：写脚本、打启动钩子、可选直写容器与重启。"""
         root = self.resolve_config_dir()
         if not root:
-            return False, "未找到 Emby 安装目录，请先映射并在插件里填写路径"
+            message = "未找到 Emby 安装目录，请先映射并在插件里填写路径"
+            self.record_action("apply", False, message)
+            return False, message
         messages: List[str] = []
         target_js = root / _DEPLOY_JS
         try:
@@ -787,14 +1058,20 @@ class EmbyExtPlayer(_PluginBase):
                 pass
             messages.append(f"脚本已写入 {target_js}")
         except Exception as e:
-            return False, f"写入脚本失败：{e}"
+            message = f"写入脚本失败：{e}"
+            self.record_action("apply", False, message)
+            return False, message
         sh_file = self.find_ext_sh(root)
         if not sh_file:
-            return False, f"未找到 ext.sh，请确认 {root} 是 Emby 安装目录（含 config/ 与 data/）"
+            message = f"未找到 ext.sh，请确认 {root} 是 Emby 安装目录（含 config/ 与 data/）"
+            self.record_action("apply", False, message)
+            return False, message
         ok, msg = self.patch_ext_sh(sh_file)
         messages.append(msg)
         if not ok:
-            return False, "；".join(messages)
+            text = "；".join(messages)
+            self.record_action("apply", False, text)
+            return False, text
         direct_ok = False
         if self._direct_write:
             direct_ok, msg = self.direct_write_container()
@@ -804,6 +1081,7 @@ class EmbyExtPlayer(_PluginBase):
             messages.append(msg)
         text = "\n".join(messages)
         logger.info(f"Emby调用播放器部署完成：{text}")
+        self.record_action("apply", True, text)
         return True, text
 
     def restore_all(self) -> Tuple[bool, str]:
@@ -828,4 +1106,5 @@ class EmbyExtPlayer(_PluginBase):
             messages.append(msg)
         text = "\n".join(messages)
         logger.info(f"Emby调用播放器还原：{text}")
+        self.record_action("restore", True, text)
         return True, text
